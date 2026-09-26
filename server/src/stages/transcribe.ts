@@ -30,7 +30,7 @@ export interface RawChunkResult {
 }
 
 /** Bump when merge/filter logic changes so cached transcripts are rebuilt (raw chunk responses are reused). */
-const TRANSCRIPT_BUILD_VERSION = 6;
+const TRANSCRIPT_BUILD_VERSION = 7;
 
 const providerDirs = (ctx: StageContext) => ({
   deepgram: artifactPath(ctx, path.join("transcribe", `deepgram-${ctx.config.deepgram.model}`)),
@@ -200,6 +200,7 @@ export function buildTranscript(
   const providers: Record<string, number> = {};
   const text: Piece[] = [];
   const speech: Interval[] = [];
+  const speechCoverage: Interval[] = [];
   const sortedSilences = [...silences].sort((a, b) => a.start - b.start);
 
   for (const r of results) {
@@ -215,7 +216,10 @@ export function buildTranscript(
       providers.llm = (providers.llm ?? 0) + 1;
       for (const u of r.llm.utterances ?? []) Object.keys(u).forEach((k) => fields.add(`llm.${k}`));
     }
-    if (r.deepgram) speech.push(...deepgramSpeech(r.deepgram, chunk, maxWordSec));
+    if (r.deepgram) {
+      speech.push(...deepgramSpeech(r.deepgram, chunk, maxWordSec));
+      speechCoverage.push({ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec });
+    }
     text.push(...(r.llm ? lm : dg));
   }
 
@@ -228,7 +232,8 @@ export function buildTranscript(
   });
 
   const chunkSeams = chunks.slice(1).map((c) => c.offsetSec);
-  return { segments, speech, chunkSeams, rawFieldsSeen: [...fields].sort(), providers };
+  speechCoverage.sort((a, b) => a.start - b.start);
+  return { segments, speech, speechCoverage, chunkSeams, rawFieldsSeen: [...fields].sort(), providers };
 }
 
 export async function runTranscribe(

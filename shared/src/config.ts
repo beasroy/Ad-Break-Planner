@@ -16,7 +16,18 @@ export interface Thresholds {
   cutPaddingMs: number;
   /** Seconds either side of the estimated scene change to search for measured silence. */
   boundarySearchSec: number;
-  /** When true, a cut is only allowed inside a measured silence window. */
+  /** Allow cuts where BOTH transcribers hear no speech (e.g. music-only transitions), when no
+   *  measured silence is available. */
+  allowSpeechFreeCuts: boolean;
+  /** Minimum speech-free length (after padding) for such a cut. */
+  minSpeechFreeSec: number;
+  /** Re-transcribe each candidate's cut window on its own and keep the cut away from any word heard. */
+  recheckCuts: boolean;
+  /** Distance the cut must keep from any word the re-listen hears. */
+  recheckPadSec: number;
+  /** Ask an audio LLM "is anyone speaking within 1s of the cut?" for every brand-matched cut. */
+  listenCheckCuts: boolean;
+  /** When true, a cut is only allowed inside a measured silence window (or a speech-free gap, see above). */
   requireSilenceConfirmation: boolean;
   /** Only when requireSilenceConfirmation is false: unconfirmed gaps need at least this length. */
   minGapWithoutSilenceMs: number;
@@ -32,6 +43,8 @@ export interface Thresholds {
 
 export interface ScoreWeights {
   where: { gap: number; shotCut: number; closure: number; calm: number };
+  /** Gap sub-score multiplier for speech-free (music) cuts: real silence is preferred. */
+  speechFreeGapFactor: number;
   /** Gap length (sec) at which the gap sub-score saturates to 1. */
   gapSaturationSec: number;
   combined: { where: number; brandFit: number };

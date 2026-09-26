@@ -18,21 +18,27 @@ export default function PlayerPage() {
       .catch((e: Error) => setError(e.message));
   }, [id]);
 
-  if (error) return <p className="text-red-600">{error}</p>;
-  if (!data) return <p className="opacity-60">Loading…</p>;
+  if (error) return <p className="text-accent-strong">{error}</p>;
+  if (!data) return <p className="text-muted">Loading...</p>;
   if (!data.results) {
     return (
-      <p>
-        Not processed yet. <Link className="underline" href={`/jobs/${id}`}>See progress</Link>
+      <p className="text-muted">
+        Not processed yet.{" "}
+        <Link className="font-medium text-accent-strong hover:text-white" href={`/jobs/${id}`}>
+          See progress
+        </Link>
       </p>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div className="flex items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold truncate">{data.job.originalName}</h1>
-        <Link href={`/jobs/${id}`} className="text-sm underline shrink-0">
+        <div>
+          <p className="text-xs uppercase tracking-[0.24em] text-accent-strong">Preview</p>
+          <h1 className="truncate text-2xl font-semibold tracking-tight">{data.job.originalName}</h1>
+        </div>
+        <Link href={`/jobs/${id}`} className="shrink-0 text-sm font-medium text-accent-strong hover:text-white">
           Results
         </Link>
       </div>

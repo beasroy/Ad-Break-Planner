@@ -75,8 +75,8 @@ export async function runPipeline(job: Job, opts: { force?: boolean } = {}): Pro
     ]);
     const transcript = await runTranscribe(ctx, ingest, raw, signals);
     const scenes = await stage("scenes", () => runScenes(ctx, transcript));
-    const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals));
-    const matched = await stage("match", () => runMatch(ctx, candidates, scenes));
+    const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals, ingest));
+    const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest));
     const selection = await stage("select", () => runSelect(ctx, matched, ingest.meta.durationSec));
     await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, scenes, matched, selection));
     job.status = "done";

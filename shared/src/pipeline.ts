@@ -49,6 +49,9 @@ export interface Transcript {
   /** Audio-aligned speech intervals (Deepgram words, each capped). Hard walls for cuts, separate from the
    *  text segments, which may come from the LLM for better scene understanding. */
   speech: Interval[];
+  /** Time ranges where Deepgram succeeded, i.e. where `speech` is complete. "Nobody is speaking"
+   *  is only ever inferred inside these ranges. */
+  speechCoverage: Interval[];
 }
 
 export interface Interval {
@@ -125,6 +128,12 @@ export interface Candidate {
   safe?: Interval;
   cutTime?: number;
   snappedTo?: "shotCut" | "silenceMidpoint" | "gapMidpoint";
+  /** Why the cut is safe: measured silence, or both transcribers hear no speech (e.g. music only). */
+  cutBasis?: "silence" | "speechFree";
+  /** Independent re-listen of just the cut window (Deepgram on a short clip). */
+  recheck?: { heardWords: number; moved: boolean };
+  /** Final listening check at the exact cut (audio LLM on a short clip): is anyone speaking? */
+  listenCheck?: { speech: boolean; heard: string; transcript: string };
   where?: WhereScore;
   rejected?: Rejection;
 }
@@ -153,8 +162,16 @@ export interface SelectionLog {
   reason: string;
 }
 
+export interface ProgrammeContext {
+  summary: string;
+  genre: string;
+  /** Activities/settings that recur across the programme. */
+  recurringContexts: string[];
+}
+
 export interface DebugReport {
   jobId: string;
+  programme?: ProgrammeContext;
   fileHash: string;
   meta: VideoMeta;
   config: unknown;

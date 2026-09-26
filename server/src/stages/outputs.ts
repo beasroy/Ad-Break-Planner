@@ -1,6 +1,16 @@
 // Stage 8: vmap.xml + debug.json.
-import type { Break, Candidate, DebugReport, IngestArtifact, MatchedCandidate, Scene, SelectionLog, Transcript } from "shared";
-import { ARTIFACTS, writeFileAtomic, writeJson } from "../lib/artifacts";
+import type {
+  Break,
+  Candidate,
+  DebugReport,
+  IngestArtifact,
+  MatchedCandidate,
+  ProgrammeContext,
+  Scene,
+  SelectionLog,
+  Transcript,
+} from "shared";
+import { ARTIFACTS, exists, readJson, writeFileAtomic, writeJson } from "../lib/artifacts";
 import { buildVmap } from "../xml/vmap";
 import { artifactPath, type StageContext } from "./context";
 
@@ -17,11 +27,17 @@ export async function runOutputs(
   await writeFileAtomic(artifactPath(ctx, ARTIFACTS.vmap), buildVmap(selection.breaks, ctx.config.publicBaseUrl));
 
   const { apiKey: _omit, ...openrouter } = ctx.config.openrouter;
+  const { apiKey: _omitDg, ...deepgram } = ctx.config.deepgram;
+  const programmePath = artifactPath(ctx, ARTIFACTS.programme);
+  const programme = (await exists(programmePath))
+    ? (await readJson<{ data: ProgrammeContext }>(programmePath)).data
+    : undefined;
   const debug: DebugReport = {
     jobId: ctx.jobId,
     fileHash,
     meta: ingest.meta,
-    config: { ...ctx.config, openrouter, catalogueHash: ctx.catalogue.hash },
+    programme,
+    config: { ...ctx.config, openrouter, deepgram, catalogueHash: ctx.catalogue.hash },
     transcriptStats: {
       segments: transcript.segments.length,
       dropped: transcript.segments.filter((s) => s.dropped).length,

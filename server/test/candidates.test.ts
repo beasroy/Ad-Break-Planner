@@ -1,6 +1,6 @@
 // HARD RULE: no cut while anyone is speaking.
 import { describe, expect, it } from "vitest";
-import { computeCandidates, findSafeInterval, subtract } from "../src/stages/candidates";
+import { applyRecheck, computeCandidates, findSafeInterval, subtract } from "../src/stages/candidates";
 import { SCORING, T, scene, seg } from "./fixtures";
 
 const inside = (t: number, a: number, b: number) => t >= a && t <= b;
@@ -88,6 +88,55 @@ describe("±boundarySearchSec search around the estimated scene change", () => {
   });
 });
 
+describe("speech-free cuts (both transcribers hear nothing, e.g. music)", () => {
+  // Gemini: A ends ~20, B starts ~23. Deepgram words elsewhere. No measured silence (music).
+  const estimate = { start: 20, end: 23 };
+  const gemini = [seg(0, 10, 20, { approxTiming: true, source: "llm" }), seg(1, 23, 33, { approxTiming: true, source: "llm" })];
+  const dgWord = (id: number, a: number, b: number) => seg(100 + id, a, b, { source: "deepgram" });
+  const cover = [{ start: 0, end: 120 }];
+
+  it("allows a cut when neither Deepgram nor Gemini hears speech for >= minSpeechFreeSec", () => {
+    const r = findSafeInterval(estimate, [...gemini, dgWord(0, 18, 19.5), dgWord(1, 23.4, 24)], [], [], 700, T, cover);
+    expect(r).toMatchObject({ basis: "speechFree", confirmed: false });
+    expect(r.safe!.start).toBeCloseTo(20 + T.cutPaddingMs / 1000);
+    expect(r.safe!.end).toBeCloseTo(23 - T.cutPaddingMs / 1000);
+  });
+
+  it("a single Deepgram word inside the gap breaks it up", () => {
+    const r = findSafeInterval(estimate, [...gemini, dgWord(0, 21.2, 21.6)], [], [], 700, T, cover);
+    expect(r.safe).toBeUndefined();
+  });
+
+  it("a Gemini utterance alone also blocks it (both must agree)", () => {
+    const r = findSafeInterval(estimate, [...gemini, seg(2, 20, 23, { approxTiming: true, source: "llm" })], [], [], 700, T, cover);
+    expect(r.safe).toBeUndefined();
+  });
+
+  it("is never used where Deepgram did not cover the audio", () => {
+    expect(findSafeInterval(estimate, gemini, [], [], 700, T, []).safe).toBeUndefined();
+    expect(findSafeInterval(estimate, gemini, [], [], 700, T, [{ start: 60, end: 120 }]).safe).toBeUndefined();
+  });
+
+  it("is not used across a transcription chunk seam", () => {
+    expect(findSafeInterval(estimate, gemini, [], [21.5], 700, T, cover).safe).toBeUndefined();
+  });
+
+  it("prefers measured silence when there is one", () => {
+    const r = findSafeInterval(estimate, gemini, [{ start: 20.5, end: 21.4 }], [], 700, T, cover);
+    expect(r.basis).toBe("silence");
+  });
+
+  it("scores speech-free gaps below equal silent gaps", () => {
+    const scenes = [scene(0, { start: 10, end: 20 }), scene(1, { start: 23, end: 33 })];
+    const base = { scenes, segments: gemini, speech: [], chunkSeams: [], minSilenceMs: 700, thresholds: T, scoring: SCORING };
+    const music = computeCandidates({ ...base, speechCoverage: cover, signals: { silences: [], shotCuts: [] } })[0];
+    const quiet = computeCandidates({ ...base, speechCoverage: cover, signals: { silences: [{ start: 20, end: 23 }], shotCuts: [] } })[0];
+    expect(music.cutBasis).toBe("speechFree");
+    expect(quiet.cutBasis).toBe("silence");
+    expect(music.where!.gap).toBeLessThan(quiet.where!.gap);
+  });
+});
+
 describe("computeCandidates", () => {
   const segments = [seg(0, 0, 10), seg(1, 10.2, 20), seg(2, 23, 30), seg(3, 30.1, 40)];
   const scenes = [
@@ -100,6 +149,7 @@ describe("computeCandidates", () => {
       scenes,
       segments,
       speech: [],
+      speechCoverage: [],
       chunkSeams: [],
       signals: { silences: [{ start: 20.1, end: 22.9 }], shotCuts: [15, 21.7, 25] },
       minSilenceMs: 700,
@@ -117,6 +167,7 @@ describe("computeCandidates", () => {
       scenes,
       segments,
       speech: [],
+      speechCoverage: [],
       chunkSeams: [],
       signals: { silences: [{ start: 20.5, end: 22.5 }], shotCuts: [] },
       minSilenceMs: 700,
@@ -138,9 +189,9 @@ describe("computeCandidates", () => {
       thresholds: T,
       scoring: SCORING,
     };
-    expect(computeCandidates({ ...base, speech: [] })[0].cutTime).toBeDefined();
+    expect(computeCandidates({ ...base, speech: [], speechCoverage: [] })[0].cutTime).toBeDefined();
     // Someone is actually talking through the quiet window per Deepgram: no cut.
-    expect(computeCandidates({ ...base, speech: [{ start: 20, end: 23 }] })[0].rejected?.stage).toBe("candidates");
+    expect(computeCandidates({ ...base, speech: [{ start: 20, end: 23 }], speechCoverage: [] })[0].rejected?.stage).toBe("candidates");
   });
 
   it("rejects boundaries where speech overlaps", () => {
@@ -149,6 +200,7 @@ describe("computeCandidates", () => {
       scenes: overlapping,
       segments,
       speech: [],
+      speechCoverage: [],
       chunkSeams: [],
       signals: { silences: [], shotCuts: [] },
       minSilenceMs: 700,
@@ -157,5 +209,24 @@ describe("computeCandidates", () => {
     });
     expect(c.rejected?.stage).toBe("candidates");
     expect(c.cutTime).toBeUndefined();
+  });
+});
+
+describe("applyRecheck (independent re-listen of the cut window)", () => {
+  const safe = { start: 100, end: 110 };
+
+  it("keeps the window when the re-listen hears nothing", () => {
+    expect(applyRecheck(safe, [], 0.5, 105)).toEqual(safe);
+  });
+
+  it("moves away from a word heard near the cut, keeping the padding", () => {
+    const kept = applyRecheck(safe, [{ start: 104.5, end: 104.9 }], 0.5, 105)!;
+    expect(kept.start).toBeCloseTo(105.4);
+    expect(kept.end).toBe(110);
+  });
+
+  it("returns nothing when the re-listen hears speech throughout", () => {
+    const words = [100, 101.5, 103, 104.5, 106, 107.5, 109].map((t) => ({ start: t, end: t + 0.9 }));
+    expect(applyRecheck(safe, words, 0.5, 105)).toBeUndefined();
   });
 });

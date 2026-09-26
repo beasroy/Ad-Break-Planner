@@ -86,6 +86,17 @@ export const config = {
     /** Every cut must sit inside a measured ffmpeg silence window. Transcript timing alone is
      *  never trusted to prove nobody is speaking (LLM timestamps drift; any transcriber can miss speech). */
     requireSilenceConfirmation: true,
+    /** Second way to prove nobody is speaking: Deepgram (audio-aligned words) AND Gemini both hear
+     *  no speech for this long. Unlocks music-only transitions, where TV normally cuts to ads. */
+    allowSpeechFreeCuts: true,
+    minSpeechFreeSec: 1.5,
+    /** Independent re-listen: Deepgram on a short clip of just the cut window. The full-chunk
+     *  pass can miss words the isolated clip reveals; disagreement = move the cut or drop it. */
+    recheckCuts: true,
+    recheckPadSec: 0.5,
+    /** Final gate: an audio LLM listens to 6s around each brand-matched cut and is asked directly
+     *  whether anyone speaks within 1s of it. Caught shouted dialogue both transcribers missed. */
+    listenCheckCuts: true,
     /** LLM transcript timestamps drift by a few seconds, so look this far either side of the
      *  estimated scene change for the real pause. The cut still has to be in measured silence. */
     boundarySearchSec: 3,
@@ -101,6 +112,7 @@ export const config = {
 
   scoring: {
     where: { gap: 0.3, shotCut: 0.2, closure: 0.3, calm: 0.2 },
+    speechFreeGapFactor: 0.7,
     gapSaturationSec: 3,
     combined: { where: 0.6, brandFit: 0.4 },
   } satisfies ScoreWeights,

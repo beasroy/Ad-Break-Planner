@@ -82,10 +82,16 @@ switch (stage) {
       await need<Scene[]>(ARTIFACTS.scenes),
       await need<Transcript>(ARTIFACTS.transcript),
       await need<Signals>(ARTIFACTS.signals),
+      await need<IngestArtifact>(ARTIFACTS.ingest),
     );
     break;
   case "match":
-    await runMatch(ctx, await need<Candidate[]>(ARTIFACTS.candidates), await need<Scene[]>(ARTIFACTS.scenes));
+    await runMatch(
+      ctx,
+      await need<Candidate[]>(ARTIFACTS.candidates),
+      await need<Scene[]>(ARTIFACTS.scenes),
+      await need<IngestArtifact>(ARTIFACTS.ingest),
+    );
     break;
   case "select":
     await runSelect(ctx, await need<(Candidate | MatchedCandidate)[]>(ARTIFACTS.matches), (await need<IngestArtifact>(ARTIFACTS.ingest)).meta.durationSec);

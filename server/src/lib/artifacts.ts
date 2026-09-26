@@ -8,6 +8,7 @@ export const ARTIFACTS = {
   scenes: "scenes.json",
   candidates: "candidates.json",
   matches: "matches.json",
+  programme: "programme.json",
   breaks: "breaks.json",
   vmap: "vmap.xml",
   debug: "debug.json",

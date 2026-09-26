@@ -35,53 +35,68 @@ export default function UploadPage() {
 
   return (
     <div className="space-y-8">
-      <section className="rounded-xl border border-black/10 dark:border-white/10 p-6 space-y-4">
-        <h1 className="text-xl font-semibold">Upload an episode</h1>
-        <p className="text-sm opacity-70">
-          The pipeline finds safe, natural ad breaks, applies pacing rules, and matches brands from the catalogue.
-        </p>
+      <section className="space-y-6 rounded-3xl border border-border bg-surface/95 p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_64px_rgba(0,0,0,0.45)]">
+        <div className="space-y-3">
+          <span className="inline-flex rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.24em] text-accent-strong">
+            Bengali streaming inspired
+          </span>
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Upload an episode</h1>
+          <p className="max-w-2xl text-sm leading-6 text-muted">
+            The pipeline finds safe, natural ad breaks, applies pacing rules, and matches brands from the catalogue.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs text-muted">
+          <span className="rounded-full border border-border bg-surface-elevated px-3 py-1">Scene-aware cuts</span>
+          <span className="rounded-full border border-border bg-surface-elevated px-3 py-1">Brand matching</span>
+          <span className="rounded-full border border-border bg-surface-elevated px-3 py-1">VMAP output</span>
+        </div>
         <div className="flex flex-wrap items-center gap-3">
           <input
             type="file"
             accept="video/*"
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             disabled={progress !== null}
-            className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-black/5 dark:file:bg-white/10 file:px-3 file:py-1.5"
+            className="w-full max-w-lg rounded-xl border border-border bg-surface-elevated px-3 py-3 text-sm text-foreground outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-accent file:px-3 file:py-1.5 file:font-medium file:text-white md:w-auto"
           />
           <button
             onClick={onUpload}
             disabled={!file || progress !== null}
-            className="rounded-md bg-foreground text-background px-4 py-1.5 text-sm font-medium disabled:opacity-40"
+            className="rounded-xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(215,25,32,0.3)] transition hover:bg-accent-strong disabled:opacity-40"
           >
             Upload & process
           </button>
         </div>
         {progress !== null && (
           <div className="space-y-1">
-            <div className="h-2 rounded bg-black/10 dark:bg-white/10 overflow-hidden">
-              <div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
+            <div className="h-2 overflow-hidden rounded-full bg-surface-elevated">
+              <div className="h-full bg-accent transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
             </div>
-            <p className="text-xs opacity-60">Uploading… {Math.round(progress * 100)}%</p>
+            <p className="text-xs text-muted">Uploading... {Math.round(progress * 100)}%</p>
           </div>
         )}
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {error && <p className="text-sm text-accent-strong">{error}</p>}
       </section>
 
       <section className="space-y-3">
-        <h2 className="font-semibold">Processed videos</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Processed videos</h2>
+          <span className="text-xs uppercase tracking-[0.24em] text-muted">{jobs.length} jobs</span>
+        </div>
         {jobs.length === 0 ? (
-          <p className="text-sm opacity-60">None yet.</p>
+          <p className="rounded-2xl border border-dashed border-border bg-surface/70 px-4 py-8 text-center text-sm text-muted">
+            None yet.
+          </p>
         ) : (
-          <ul className="divide-y divide-black/10 dark:divide-white/10 rounded-xl border border-black/10 dark:border-white/10">
+          <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface/90">
             {jobs.map((j) => (
-              <li key={j.id} className="flex items-center justify-between gap-3 px-4 py-3">
-                <Link href={`/jobs/${j.id}`} className="font-medium hover:underline truncate">
+              <li key={j.id} className="flex items-center justify-between gap-3 px-4 py-4 transition hover:bg-surface-elevated/80">
+                <Link href={`/jobs/${j.id}`} className="truncate font-medium hover:text-accent-strong">
                   {j.originalName}
                 </Link>
                 <div className="flex items-center gap-3 shrink-0">
                   <StatusBadge status={j.status} />
                   {j.status === "done" && (
-                    <Link href={`/jobs/${j.id}/player`} className="text-sm underline">
+                    <Link href={`/jobs/${j.id}/player`} className="text-sm font-medium text-accent-strong hover:text-white">
                       Play
                     </Link>
                   )}
