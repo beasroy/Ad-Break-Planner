@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { LoaderCircle, Play, Trash2 } from "lucide-react";
 import type { Job } from "shared";
-import { deleteJob, subscribeJobs, uploadVideo } from "@/lib/api";
+import { deleteJob, listBrands, subscribeJobs, uploadVideo } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { currentStage } from "@/lib/stages";
 
@@ -54,8 +54,14 @@ export default function UploadPage() {
   async function onUpload() {
     if (!file) return;
     setError(null);
-    setProgress(0);
     try {
+      const { brands } = await listBrands();
+      const hasAds = brands.some((brand) => brand.creatives.length > 0);
+      if (!hasAds) {
+        setError("Please add ads first.");
+        return;
+      }
+      setProgress(0);
       const { job } = await uploadVideo(file, setProgress);
       router.push(`/jobs/${job.id}`);
     } catch (e) {
