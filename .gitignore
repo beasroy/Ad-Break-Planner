@@ -1,0 +1,10 @@
+node_modules/
+data/
+.env
+.next/
+dist/
+samples/
+catalogue/ads/
+PLAN.md
+ROADMAP.md
+*.tmp-*
