@@ -8,6 +8,13 @@ import { createBrand, deleteBrand, importCatalogue, listBrands, rerunAllJobs } f
 const DURATIONS = [15, 20, 30];
 type Tab = "import" | "add";
 
+const normaliseBrand = (b: BrandSummary): BrandSummary => ({
+  ...b,
+  targetContexts: b.targetContexts ?? [],
+  negativeContexts: b.negativeContexts ?? [],
+  creatives: b.creatives ?? [],
+});
+
 export default function BrandsPage() {
   const [brands, setBrands] = useState<BrandSummary[]>([]);
   const [tab, setTab] = useState<Tab>("import");
@@ -18,7 +25,7 @@ export default function BrandsPage() {
 
   const load = () =>
     listBrands()
-      .then((r) => setBrands(r.brands))
+      .then((r) => setBrands((r.brands ?? []).map(normaliseBrand)))
       .catch((e: Error) => setError(e.message));
 
   useEffect(() => {
@@ -52,13 +59,18 @@ export default function BrandsPage() {
     act("import", async () => {
       const r = await importCatalogue(data, setProgress);
       form.reset();
+      const added = r.added ?? [];
+      const updated = r.updated ?? [];
+      const removed = r.removed ?? [];
+      const generatedCreatives = r.generatedCreatives ?? 0;
+      const requeuedJobs = r.requeuedJobs ?? [];
       const parts = [
-        r.added.length && `${r.added.length} added`,
-        r.updated.length && `${r.updated.length} updated`,
-        r.removed.length && `${r.removed.length} removed`,
-        r.generatedCreatives && `${r.generatedCreatives} missing ad${r.generatedCreatives === 1 ? "" : "s"} created`,
+        added.length && `${added.length} added`,
+        updated.length && `${updated.length} updated`,
+        removed.length && `${removed.length} removed`,
+        generatedCreatives && `${generatedCreatives} missing ad${generatedCreatives === 1 ? "" : "s"} created`,
       ].filter(Boolean);
-      return `Imported: ${parts.join(", ") || "no changes"}. ${requeuedNote(r.requeuedJobs.length)}`;
+      return `Imported: ${parts.join(", ") || "no changes"}. ${requeuedNote(requeuedJobs.length)}`;
     });
   }
 
@@ -72,13 +84,13 @@ export default function BrandsPage() {
     act("create", async () => {
       const r = await createBrand(data);
       form.reset();
-      return `Created ${r.brand?.name}. ${requeuedNote(r.requeuedJobs.length)}`;
+      return `Created ${r.brand?.name}. ${requeuedNote((r.requeuedJobs ?? []).length)}`;
     });
   }
 
   function onDelete(b: BrandSummary) {
     if (!confirm(`Delete ${b.name} and its ads? Every processed video will be re-run without it.`)) return;
-    act(b.id, async () => `Deleted ${b.name}. ${requeuedNote((await deleteBrand(b.id)).requeuedJobs.length)}`);
+    act(b.id, async () => `Deleted ${b.name}. ${requeuedNote(((await deleteBrand(b.id)).requeuedJobs ?? []).length)}`);
   }
 
   const input =
