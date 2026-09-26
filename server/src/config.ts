@@ -16,6 +16,25 @@ export const config = {
   dataDir: resolveFromRoot(process.env.DATA_DIR ?? "data"),
   cataloguePath: resolveFromRoot(process.env.CATALOGUE_PATH ?? "catalogue/brands.json"),
   maxUploadBytes: 4 * 1024 ** 3,
+  /** SQLite file: jobs, attempts, stage status, audit trail, model calls. Lives next to the artifacts. */
+  dbPath: resolveFromRoot(process.env.DB_PATH ?? path.join(process.env.DATA_DIR ?? "data", "app.db")),
+
+  /** Durable job queue (rows in the jobs table, claimed by a worker loop). */
+  queue: {
+    /** Pipelines running at once. One keeps every model under its rate limit. */
+    concurrency: Number(process.env.QUEUE_CONCURRENCY ?? 1),
+    pollMs: 1000,
+    /** Automatic attempts per run (first try + retries). A manual retry or re-upload grants a fresh budget. */
+    maxAttempts: 3,
+    /** Retry delay: base × 4^(n−1), capped (30s, 2m, 8m, ...). Cached stages make a retry resume where it failed. */
+    backoffBaseSec: 30,
+    backoffMaxSec: 600,
+    /** A running job writes a heartbeat; one silent for staleAfterSec belongs to a dead process and is recovered. */
+    heartbeatSec: 10,
+    staleAfterSec: 60,
+    /** An attempt running longer than this is failed at the next stage boundary. */
+    attemptTimeoutSec: 60 * 60,
+  },
 
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",

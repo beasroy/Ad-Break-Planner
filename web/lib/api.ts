@@ -1,6 +1,6 @@
 // Typed client for the server API. Endpoint shapes are PROVISIONAL (see shared/src/api.ts)
 // until API_SPEC.md exists.
-import type { CreateJobResponse, GetJobResponse, ListJobsResponse } from "shared";
+import type { CreateJobResponse, GetJobResponse, Job, JobAuditResponse, JobStreamEvent, ListJobsResponse } from "shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -12,6 +12,49 @@ async function getJson<T>(path: string): Promise<T> {
 
 export const listJobs = () => getJson<ListJobsResponse>("/api/jobs");
 export const getJob = (id: string) => getJson<GetJobResponse>(`/api/jobs/${encodeURIComponent(id)}`);
+
+/**
+ * Live job updates over Server-Sent Events. The browser reconnects by itself after a drop, and
+ * every (re)connect starts with a fresh snapshot, so the caller's state is always complete.
+ * Returns a function that closes the stream.
+ */
+export function subscribeJobs(
+  opts: { jobId?: string },
+  on: {
+    snapshot: (jobs: Job[]) => void;
+    job: (job: Job) => void;
+    deleted: (id: string) => void;
+    connection?: (connected: boolean) => void;
+  },
+): () => void {
+  const qs = opts.jobId ? `?jobId=${encodeURIComponent(opts.jobId)}` : "";
+  const es = new EventSource(`${API_URL}/api/events${qs}`);
+  const parse = (e: MessageEvent) => JSON.parse(e.data) as JobStreamEvent;
+  es.addEventListener("snapshot", (e) => {
+    const ev = parse(e as MessageEvent);
+    if (ev.type === "snapshot") on.snapshot(ev.jobs);
+    on.connection?.(true);
+  });
+  es.addEventListener("job", (e) => {
+    const ev = parse(e as MessageEvent);
+    if (ev.type === "job") on.job(ev.job);
+  });
+  es.addEventListener("deleted", (e) => {
+    const ev = parse(e as MessageEvent);
+    if (ev.type === "deleted") on.deleted(ev.id);
+  });
+  es.onerror = () => on.connection?.(false);
+  return () => es.close();
+}
+
+export const getJobAudit = (id: string) => getJson<JobAuditResponse>(`/api/jobs/${encodeURIComponent(id)}/audit`);
+
+export async function retryJob(id: string): Promise<CreateJobResponse> {
+  const res = await fetch(`${API_URL}/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? `retry failed: HTTP ${res.status}`);
+  return body as CreateJobResponse;
+}
 
 export async function deleteJob(id: string): Promise<void> {
   const res = await fetch(`${API_URL}/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });

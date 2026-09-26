@@ -4,6 +4,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "../config";
+import { recordModelCall } from "./callContext";
 import { HttpError, withRetry } from "./retry";
 
 const { deepgram: dg } = config;
@@ -20,14 +21,38 @@ export async function transcribeDeepgram(filePath: string): Promise<any> {
     utt_split: String(dg.uttSplitSec),
   });
   return withRetry(`deepgram ${path.basename(filePath)}`, dg.retries, async () => {
-    const res = await fetch(`${dg.baseUrl}/listen?${params}`, {
-      method: "POST",
-      headers: { Authorization: `Token ${dg.apiKey}`, "Content-Type": "audio/mpeg" },
-      body: bytes,
-      signal: AbortSignal.timeout(dg.requestTimeoutMs),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new HttpError("Deepgram", res.status, text);
-    return JSON.parse(text);
+    const started = new Date();
+    const log = (ok: boolean, extra: { httpStatus?: number; error?: string; audioSec?: number }) =>
+      recordModelCall({
+        provider: "deepgram",
+        model: dg.model,
+        label: path.basename(filePath),
+        startedAt: started.toISOString(),
+        latencyMs: Date.now() - started.getTime(),
+        ok,
+        ...extra,
+      });
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(`${dg.baseUrl}/listen?${params}`, {
+        method: "POST",
+        headers: { Authorization: `Token ${dg.apiKey}`, "Content-Type": "audio/mpeg" },
+        body: bytes,
+        signal: AbortSignal.timeout(dg.requestTimeoutMs),
+      });
+      text = await res.text();
+    } catch (err) {
+      log(false, { error: (err as Error).message });
+      throw err;
+    }
+    if (!res.ok) {
+      log(false, { httpStatus: res.status, error: text.slice(0, 500) });
+      throw new HttpError("Deepgram", res.status, text);
+    }
+    const body = JSON.parse(text);
+    // Deepgram bills by audio duration and does not return a price.
+    log(true, { httpStatus: res.status, audioSec: body?.metadata?.duration });
+    return body;
   });
 }

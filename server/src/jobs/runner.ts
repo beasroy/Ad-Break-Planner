@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Job, StageName } from "shared";
+import type { StageName, StageStatus } from "shared";
 import { config } from "../config";
 import { loadCatalogue } from "../catalogue/loader";
 import { ARTIFACTS } from "../lib/artifacts";
+import { withCallContext } from "../lib/callContext";
+import { PermanentError } from "../lib/errors";
 import { makeContext, type StageContext } from "../stages/context";
 import { runCandidates } from "../stages/candidates";
 import { runIngest } from "../stages/ingest";
@@ -13,7 +15,6 @@ import { runScenes } from "../stages/scenes";
 import { runSelect } from "../stages/select";
 import { runSignals } from "../stages/signals";
 import { runTranscribe, transcribeChunks } from "../stages/transcribe";
-import { setStage } from "./store";
 
 export const jobDir = (fileHash: string) => path.join(config.dataDir, fileHash);
 
@@ -22,15 +23,39 @@ export async function findSourceVideo(dir: string): Promise<string | undefined> 
   return f ? path.join(dir, f) : undefined;
 }
 
-const running = new Set<string>();
+/** Thrown at a stage boundary once the attempt has run longer than allowed. */
+export class AttemptTimeoutError extends Error {
+  override name = "AttemptTimeoutError";
+}
 
-/** Runs every stage in order. Stages reuse cached artifacts, so re-running a finished job is cheap. */
-export async function runPipeline(job: Job, opts: { force?: boolean } = {}): Promise<void> {
-  if (running.has(job.id)) return;
-  running.add(job.id);
-  job.status = "running";
-  job.error = undefined;
+export interface PipelineHooks {
+  onStage: (stage: StageName, status: StageStatus) => void;
+  /** Aborted when the attempt times out; checked before each stage starts. */
+  signal?: AbortSignal;
+}
 
+export interface PipelineResult {
+  durationSec: number;
+  breakCount: number;
+}
+
+/** The stage a pipeline error came from, for the attempt record. */
+export class StageError extends Error {
+  constructor(public stage: StageName, public cause: unknown) {
+    super((cause as Error)?.message ?? String(cause));
+    this.name = "StageError";
+  }
+}
+
+/**
+ * Runs every stage in order and throws on failure (the queue decides whether to retry).
+ * Stages reuse cached artifacts, so a retry or re-run resumes where the last one stopped.
+ */
+export async function runPipeline(
+  job: { id: string; fileHash: string },
+  hooks: PipelineHooks,
+  opts: { force?: boolean } = {},
+): Promise<PipelineResult> {
   const dir = jobDir(job.fileHash);
   // A stage counts as "cached" when its artifact existed beforehand and was not rewritten.
   const artifactFor: Partial<Record<StageName, string>> = {
@@ -47,44 +72,38 @@ export async function runPipeline(job: Job, opts: { force?: boolean } = {}): Pro
   };
 
   async function stage<T>(name: StageName, fn: () => Promise<T>): Promise<T> {
+    if (hooks.signal?.aborted) throw new StageError(name, hooks.signal.reason);
     const before = await mtime(name);
-    setStage(job, name, { state: "running", startedAt: new Date().toISOString(), note: undefined });
+    const startedAt = new Date().toISOString();
+    hooks.onStage(name, { state: "running", startedAt });
     try {
-      const r = await fn();
+      const r = await withCallContext({ stage: name }, fn);
       const cached = before !== undefined && before === (await mtime(name));
-      setStage(job, name, { state: cached ? "cached" : "done", finishedAt: new Date().toISOString() });
+      hooks.onStage(name, { state: cached ? "cached" : "done", startedAt, finishedAt: new Date().toISOString() });
       return r;
     } catch (err) {
-      setStage(job, name, { state: "error", finishedAt: new Date().toISOString(), note: (err as Error).message });
-      throw err;
+      hooks.onStage(name, { state: "error", startedAt, finishedAt: new Date().toISOString(), note: (err as Error).message });
+      throw new StageError(name, err);
     }
   }
 
-  try {
-    const videoPath = await findSourceVideo(dir);
-    if (!videoPath) throw new Error(`source video missing in ${dir}`);
-    // Catalogue is re-read for every run so a changed/added brand needs no restart.
-    const catalogue = await loadCatalogue(config.cataloguePath);
-    const ctx: StageContext = makeContext({ jobId: job.id, dir, videoPath, catalogue, force: opts.force });
+  const videoPath = await findSourceVideo(dir);
+  if (!videoPath) throw new PermanentError(`source video missing in ${dir}`);
+  // Catalogue is re-read for every run so a changed/added brand needs no restart.
+  const catalogue = await loadCatalogue(config.cataloguePath);
+  const ctx: StageContext = makeContext({ jobId: job.id, dir, videoPath, catalogue, force: opts.force });
 
-    const ingest = await stage("ingest", () => runIngest(ctx));
-    // Transcription and ffmpeg signals run side by side; the transcript filter needs both.
-    const [raw, signals] = await Promise.all([
-      stage("transcribe", () => transcribeChunks(ctx, ingest)),
-      stage("signals", () => runSignals(ctx, ingest)),
-    ]);
-    const transcript = await runTranscribe(ctx, ingest, raw, signals);
-    const scenes = await stage("scenes", () => runScenes(ctx, transcript));
-    const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals, ingest));
-    const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest));
-    const selection = await stage("select", () => runSelect(ctx, matched, ingest.meta.durationSec));
-    await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, scenes, matched, selection));
-    job.status = "done";
-  } catch (err) {
-    job.status = "error";
-    job.error = (err as Error).message;
-    console.error(`[${job.id}] pipeline failed:`, err);
-  } finally {
-    running.delete(job.id);
-  }
+  const ingest = await stage("ingest", () => runIngest(ctx));
+  // Transcription and ffmpeg signals run side by side; the transcript filter needs both.
+  const [raw, signals] = await Promise.all([
+    stage("transcribe", () => transcribeChunks(ctx, ingest)),
+    stage("signals", () => runSignals(ctx, ingest)),
+  ]);
+  const transcript = await runTranscribe(ctx, ingest, raw, signals);
+  const scenes = await stage("scenes", () => runScenes(ctx, transcript));
+  const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals, ingest));
+  const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest));
+  const selection = await stage("select", () => runSelect(ctx, matched, ingest.meta.durationSec));
+  await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, scenes, matched, selection));
+  return { durationSec: ingest.meta.durationSec, breakCount: selection.breaks.length };
 }

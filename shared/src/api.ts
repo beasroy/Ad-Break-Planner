@@ -1,5 +1,5 @@
 // PROVISIONAL: endpoint contracts until API_SPEC.md lands.
-import type { Job } from "./job";
+import type { AuditEvent, Job, JobAttempt, ModelCall, ModelUsage } from "./job";
 import type { Break } from "./pipeline";
 
 /** POST /api/jobs  (multipart, field "video") */
@@ -34,3 +34,24 @@ export interface BreaksResponse {
   durationSec: number;
   breaks: (Break & { brandName: string; timeOffset: string; vastUrl: string; creativeUrl: string })[];
 }
+
+/** GET /api/jobs/:id/audit */
+export interface JobAuditResponse {
+  jobId: string;
+  attempts: JobAttempt[];
+  events: AuditEvent[];
+  usage: ModelUsage[];
+  totals: { calls: number; errors: number; costUsd: number };
+  /** Most recent calls first. */
+  modelCalls: ModelCall[];
+}
+
+/**
+ * GET /api/events[?jobId=]  (Server-Sent Events). On connect: `snapshot` with the current
+ * jobs (or the one job), then `job` whenever a job changes and `deleted` when one is removed.
+ * A reconnect gets a fresh snapshot, so nothing missed while offline is lost.
+ */
+export type JobStreamEvent =
+  | { type: "snapshot"; jobs: Job[] }
+  | { type: "job"; job: Job }
+  | { type: "deleted"; id: string };

@@ -1,14 +1,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import multer from "multer";
-import { STAGES, type BreaksResponse, type CreateJobResponse, type GetJobResponse, type Job, type ListJobsResponse } from "shared";
+import type {
+  BreaksResponse,
+  CreateJobResponse,
+  GetJobResponse,
+  Job,
+  JobAuditResponse,
+  JobStreamEvent,
+  ListJobsResponse,
+} from "shared";
 import { config } from "../config";
 import { loadCatalogue } from "../catalogue/loader";
+import { getRepo, type Requester } from "../db";
 import { ARTIFACTS, exists, readJson, writeJson } from "../lib/artifacts";
 import { hashFile } from "../lib/hash";
-import { findSourceVideo, jobDir, runPipeline } from "../jobs/runner";
-import { createJob, getJob, jobIdForHash, listJobs, removeJob } from "../jobs/store";
+import { subscribeJobEvents } from "../jobs/events";
+import { findSourceVideo, jobDir } from "../jobs/runner";
 import type { Break, DebugReport } from "shared";
 import { toTimeOffset, vastUrl } from "../xml/vmap";
 import { creativeUrl } from "../xml/vast";
@@ -18,21 +27,31 @@ const upload = multer({ dest: uploadDir, limits: { fileSize: config.maxUploadByt
 
 export const jobsRouter = Router();
 
-/** Re-register jobs from disk on startup so pre-processed videos survive a restart. */
-export async function restoreJobs() {
+/** Set at startup: wakes the queue worker as soon as there is new work. */
+export const queueSignal = { notify: () => {} };
+
+const requester = (req: Request): Requester => ({ ip: req.ip, userAgent: req.get("user-agent") });
+
+/**
+ * Registers artifact folders from before the database existed (one-off, idempotent).
+ * Finished ones come back as done; unfinished ones as failed, so they never spend API
+ * calls until someone presses Retry.
+ */
+export async function importLegacyJobs() {
   await fs.mkdir(uploadDir, { recursive: true });
+  const repo = getRepo();
+  let imported = 0;
   for (const name of await fs.readdir(config.dataDir)) {
     const dir = path.join(config.dataDir, name);
     const metaPath = path.join(dir, "job.json");
     if (!(await exists(metaPath))) continue;
     const meta = await readJson<{ originalName: string; createdAt: string }>(metaPath);
-    const job = createJob(name, meta.originalName);
-    job.createdAt = meta.createdAt;
-    if (await exists(path.join(dir, ARTIFACTS.debug))) {
-      job.status = "done";
-      for (const s of STAGES) job.stages[s] = { state: "cached" };
+    const finished = await exists(path.join(dir, ARTIFACTS.debug));
+    if (repo.importLegacy({ fileHash: name, originalName: meta.originalName, createdAt: meta.createdAt, finished, maxAttempts: config.queue.maxAttempts })) {
+      imported++;
     }
   }
+  if (imported) console.log(`Imported ${imported} job(s) from data/ into the database`);
 }
 
 // PROVISIONAL
@@ -49,13 +68,17 @@ jobsRouter.post("/api/jobs", upload.single("video"), async (req, res, next) => {
       await fs.rename(req.file.path, path.join(dir, `source${ext}`));
     }
 
-    let job = getJob(jobIdForHash(hash));
-    if (!job || job.status !== "running") {
-      job = createJob(hash, req.file.originalname);
-      await writeJson(path.join(dir, "job.json"), { originalName: job.originalName, createdAt: job.createdAt });
-      // Fire and forget; cached stages make a re-upload fast. The web app polls status.
-      void runPipeline(job);
-    }
+    const { job, outcome } = getRepo().enqueueUpload({
+      fileHash: hash,
+      originalName: req.file.originalname,
+      sizeBytes: req.file.size,
+      mimeType: req.file.mimetype,
+      maxAttempts: config.queue.maxAttempts,
+      requester: requester(req),
+    });
+    // Kept so the folder can be re-imported if the database is ever lost.
+    await writeJson(path.join(dir, "job.json"), { originalName: job.originalName, createdAt: job.createdAt });
+    if (outcome !== "already-active") queueSignal.notify();
     res.json({ job } satisfies CreateJobResponse);
   } catch (err) {
     next(err);
@@ -64,28 +87,72 @@ jobsRouter.post("/api/jobs", upload.single("video"), async (req, res, next) => {
 
 // PROVISIONAL
 jobsRouter.get("/api/jobs", (_req, res) => {
-  res.json({ jobs: listJobs() } satisfies ListJobsResponse);
+  res.json({ jobs: getRepo().listJobs() } satisfies ListJobsResponse);
 });
 
-const withJob = (id: string, res: any): Job | undefined => {
-  const job = getJob(id);
+/** Keeps idle connections open through proxies that close silent streams. */
+const SSE_PING_MS = 25_000;
+
+// PROVISIONAL: live job updates (Server-Sent Events). ?jobId= limits the stream to one job.
+jobsRouter.get("/api/events", (req, res) => {
+  const jobId = typeof req.query.jobId === "string" ? req.query.jobId : undefined;
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no", // nginx: do not buffer the stream
+  });
+  const send = (e: JobStreamEvent) => res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+
+  const repo = getRepo();
+  const one = jobId ? repo.getJob(jobId) : undefined;
+  send({ type: "snapshot", jobs: jobId ? (one ? [one] : []) : repo.listJobs() });
+
+  const unsubscribe = subscribeJobEvents((e) => {
+    if (!jobId || (e.type === "job" ? e.job.id : e.id) === jobId) send(e);
+  });
+  const ping = setInterval(() => res.write(": ping\n\n"), SSE_PING_MS);
+  req.on("close", () => {
+    clearInterval(ping);
+    unsubscribe();
+  });
+});
+
+const withJob = (id: string, res: Response): Job | undefined => {
+  const job = getRepo().getJob(id);
   if (!job) res.status(404).json({ error: "job not found" });
   return job;
 };
 
-// PROVISIONAL: deletes the job and everything in its folder (source video, cached stages, outputs).
+// PROVISIONAL: deletes the job's folder (source video, cached stages, outputs). The database row
+// and its audit trail are kept, marked deleted.
 jobsRouter.delete("/api/jobs/:id", async (req, res, next) => {
   try {
-    const job = withJob(req.params.id, res);
-    if (!job) return;
     // A running pipeline would keep writing into the folder we are removing.
-    if (job.status === "running") return res.status(409).json({ error: "job is still processing" });
-    removeJob(job.id);
-    await fs.rm(jobDir(job.fileHash), { recursive: true, force: true });
+    const r = getRepo().markDeleted(req.params.id, requester(req));
+    if (r.error === "not-found") return res.status(404).json({ error: "job not found" });
+    if (r.error === "running") return res.status(409).json({ error: "job is still processing" });
+    await fs.rm(jobDir(r.fileHash!), { recursive: true, force: true });
     res.status(204).end();
   } catch (err) {
     next(err);
   }
+});
+
+// PROVISIONAL: manual retry of a failed job, with a fresh attempt budget.
+jobsRouter.post("/api/jobs/:id/retry", (req, res) => {
+  const r = getRepo().retry(req.params.id, config.queue.maxAttempts, requester(req));
+  if (r.error === "not-found") return res.status(404).json({ error: "job not found" });
+  if (r.error) return res.status(409).json({ error: r.error });
+  queueSignal.notify();
+  res.json({ job: r.job! } satisfies CreateJobResponse);
+});
+
+// PROVISIONAL: attempts, the append-only event trail, and every model call with latency and cost.
+jobsRouter.get("/api/jobs/:id/audit", (req, res) => {
+  const audit = getRepo().getAudit(req.params.id);
+  if (!audit) return res.status(404).json({ error: "job not found" });
+  res.json(audit satisfies JobAuditResponse);
 });
 
 async function loadBreaks(job: Job): Promise<{ breaks: (Break & { brandName: string })[]; durationSec: number } | undefined> {

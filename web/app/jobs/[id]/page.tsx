@@ -3,9 +3,11 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
-import { STAGES, type GetJobResponse, type StageName } from "shared";
-import { fmtTime, getJob } from "@/lib/api";
+import { ArrowLeft } from "lucide-react";
+import { STAGES, type GetJobResponse, type Job, type StageName } from "shared";
+import { fmtTime, getJob, retryJob, subscribeJobs } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { JobAudit } from "@/components/JobAudit";
 
 const STAGE_LABELS: Record<StageName, string> = {
   ingest: "Extract audio",
@@ -22,26 +24,45 @@ export default function JobPage() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<GetJobResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
+  async function onRetry() {
+    setRetrying(true);
+    try {
+      await retryJob(id); // the new status arrives over the live stream
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  // Status and stage progress are pushed live (SSE). Results (breaks) are fetched once the job is done.
   useEffect(() => {
     let stop = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        const r = await getJob(id);
-        if (stop) return;
-        setData(r);
-        setError(null);
-        if (r.job.status === "done" || r.job.status === "error") return;
-      } catch (e) {
-        if (!stop) setError((e as Error).message);
-      }
-      if (!stop) timer = setTimeout(poll, 2000);
+    const loadResults = () =>
+      getJob(id)
+        .then((r) => !stop && setData((d) => (d && d.job.status === "done" ? { ...d, results: r.results } : d)))
+        .catch((e: Error) => !stop && setError(e.message));
+    const apply = (job: Job) => {
+      setError(null);
+      setData((d) => ({ job, results: job.status === "done" ? d?.results : undefined }));
+      if (job.status === "done") loadResults();
     };
-    poll();
+    const close = subscribeJobs(
+      { jobId: id },
+      {
+        snapshot: (jobs) => (jobs[0] ? apply(jobs[0]) : setError("Job not found.")),
+        job: apply,
+        deleted: () => {
+          setData(null);
+          setError("This video was deleted.");
+        },
+      },
+    );
     return () => {
       stop = true;
-      clearTimeout(timer);
+      close();
     };
   }, [id]);
 
@@ -51,14 +72,30 @@ export default function JobPage() {
 
   return (
     <div className="space-y-8">
+      <Link href="/" className="inline-flex items-center gap-2 text-sm font-medium text-muted transition hover:text-foreground">
+        <ArrowLeft className="h-4 w-4" />
+        All videos
+      </Link>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-accent-strong">Processing</p>
           <h1 className="text-2xl font-semibold tracking-tight">{job.originalName}</h1>
-          <p className="font-mono text-xs text-muted">job {job.id}</p>
+          <p className="font-mono text-xs text-muted">
+            job {job.id}
+            {!!job.attempts && ` · attempt ${job.attempts} of ${job.maxAttempts}`}
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <StatusBadge status={job.status} />
+          {job.status === "error" && (
+            <button
+              onClick={onRetry}
+              disabled={retrying}
+              className="rounded-xl border border-accent/40 px-4 py-2 text-sm font-semibold text-accent-strong transition hover:bg-accent/10 disabled:opacity-40"
+            >
+              {retrying ? "Retrying..." : "Retry"}
+            </button>
+          )}
           {results && (
             <Link
               href={`/jobs/${job.id}/player`}
@@ -87,8 +124,16 @@ export default function JobPage() {
             );
           })}
         </ol>
+        {job.status === "retrying" && job.nextRunAt && (
+          <p className="mt-3 text-sm text-orange-300">
+            Attempt {job.attempts} failed. Retrying automatically at {new Date(job.nextRunAt).toLocaleTimeString()}; cached
+            stages are reused.
+          </p>
+        )}
         {job.error && <p className="mt-3 wrap-break-word text-sm text-accent-strong">{job.error}</p>}
       </section>
+
+      <JobAudit jobId={job.id} refreshKey={`${job.status}:${job.attempts}:${job.updatedAt}`} />
 
       {results && (
         <section className="space-y-3">

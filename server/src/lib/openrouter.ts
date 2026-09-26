@@ -1,4 +1,5 @@
 import { config } from "../config";
+import { recordModelCall } from "./callContext";
 import { HttpError, createRateLimiter, withRetry } from "./retry";
 
 const { openrouter: or } = config;
@@ -41,21 +42,50 @@ export async function chatJson(opts: {
     or.retries,
     async () => {
       await acquire(model);
-      const res = await post(
-        "/chat/completions",
-        JSON.stringify({
+      const started = new Date();
+      let res: any;
+      try {
+        res = await post(
+          "/chat/completions",
+          JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: opts.system },
+              { role: "user", content: opts.user },
+            ],
+            response_format: {
+              type: "json_schema",
+              json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
+            },
+            usage: { include: true },
+          }),
+          { "Content-Type": "application/json" },
+        );
+      } catch (err) {
+        recordModelCall({
+          provider: "openrouter",
           model,
-          messages: [
-            { role: "system", content: opts.system },
-            { role: "user", content: opts.user },
-          ],
-          response_format: {
-            type: "json_schema",
-            json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
-          },
-        }),
-        { "Content-Type": "application/json" },
-      );
+          label: opts.label,
+          startedAt: started.toISOString(),
+          latencyMs: Date.now() - started.getTime(),
+          ok: false,
+          httpStatus: err instanceof HttpError ? err.status : undefined,
+          error: (err as Error).message,
+        });
+        throw err;
+      }
+      recordModelCall({
+        provider: "openrouter",
+        model,
+        label: opts.label,
+        startedAt: started.toISOString(),
+        latencyMs: Date.now() - started.getTime(),
+        ok: true,
+        httpStatus: 200,
+        inputTokens: res?.usage?.prompt_tokens,
+        outputTokens: res?.usage?.completion_tokens,
+        costUsd: typeof res?.usage?.cost === "number" ? res.usage.cost : undefined,
+      });
       const content = res?.choices?.[0]?.message?.content;
       if (typeof content !== "string") throw new Error(`${opts.label}: no message content in response`);
       return JSON.parse(content);

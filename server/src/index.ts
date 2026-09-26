@@ -4,7 +4,10 @@ import cors from "cors";
 import { config } from "./config";
 import { assertFfmpegAvailable } from "./lib/ffmpeg";
 import { loadCatalogue } from "./catalogue/loader";
-import { jobsRouter, restoreJobs } from "./routes/jobs";
+import { initDb } from "./db";
+import { createQueue } from "./jobs/queue";
+import { runPipeline } from "./jobs/runner";
+import { importLegacyJobs, jobsRouter, queueSignal } from "./routes/jobs";
 import { adsRouter } from "./routes/ads";
 
 async function main() {
@@ -15,7 +18,21 @@ async function main() {
   console.log(`Catalogue: ${catalogue.brands.length} brands, ${catalogue.negativeVocab.length} negative contexts`);
 
   await fs.mkdir(config.dataDir, { recursive: true });
-  await restoreJobs();
+  const repo = initDb(config.dbPath);
+  console.log(`Database: ${config.dbPath}`);
+  await importLegacyJobs();
+
+  const queue = createQueue({ repo, run: runPipeline, config: config.queue });
+  queueSignal.notify = queue.notify;
+  queue.start();
+  // On shutdown, hand running jobs back to the queue at once so the next start resumes them.
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.once(sig, () => {
+      const released = queue.stop();
+      if (released.length) console.log(`Released ${released.length} running job(s) back to the queue`);
+      process.exit(0);
+    });
+  }
 
   const app = express();
   app.use(cors());

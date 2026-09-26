@@ -11,7 +11,6 @@ import { loadCatalogue } from "../src/catalogue/loader";
 import { ARTIFACTS, exists, readJson, writeJson } from "../src/lib/artifacts";
 import { hashFile } from "../src/lib/hash";
 import { findSourceVideo, runPipeline } from "../src/jobs/runner";
-import { createJob } from "../src/jobs/store";
 import { makeContext } from "../src/stages/context";
 import { runIngest } from "../src/stages/ingest";
 import { runSignals } from "../src/stages/signals";
@@ -56,9 +55,13 @@ const need = async <T>(name: string): Promise<T> => {
 const t0 = Date.now();
 switch (stage) {
   case "all": {
-    const job = createJob(hash, path.basename(videoPath));
-    await runPipeline(job, { force });
-    console.log(JSON.stringify(job, null, 2));
+    // CLI run: straight through the pipeline, no queue or database.
+    const result = await runPipeline(
+      { id: hash.slice(0, 16), fileHash: hash },
+      { onStage: (s, st) => st.state !== "running" && console.log(`${s}: ${st.state}${st.note ? ` (${st.note})` : ""}`) },
+      { force },
+    );
+    console.log(JSON.stringify(result, null, 2));
     break;
   }
   case "ingest":

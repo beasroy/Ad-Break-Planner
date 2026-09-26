@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { LoaderCircle, Play, Trash2 } from "lucide-react";
 import type { Job } from "shared";
-import { deleteJob, listJobs, uploadVideo } from "@/lib/api";
+import { deleteJob, subscribeJobs, uploadVideo } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
-import { PlayIcon, SpinnerIcon, TrashIcon } from "@/components/Icons";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -15,12 +15,26 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [live, setLive] = useState(true);
 
-  useEffect(() => {
-    listJobs()
-      .then((r) => setJobs(r.jobs))
-      .catch((e: Error) => setError(e.message));
-  }, []);
+  // Live statuses pushed by the server (SSE); no polling.
+  useEffect(
+    () =>
+      subscribeJobs(
+        {},
+        {
+          snapshot: (all) => {
+            setJobs(all);
+            setError(null);
+          },
+          job: (job) =>
+            setJobs((js) => (js.some((j) => j.id === job.id) ? js.map((j) => (j.id === job.id ? job : j)) : [job, ...js])),
+          deleted: (id) => setJobs((js) => js.filter((j) => j.id !== id)),
+          connection: (ok) => setLive(ok),
+        },
+      ),
+    [],
+  );
 
   async function onDelete(job: Job) {
     if (!confirm(`Delete "${job.originalName}"? This removes the video and all its results.`)) return;
@@ -96,7 +110,10 @@ export default function UploadPage() {
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold">Processed videos</h2>
-          <span className="text-xs uppercase tracking-[0.24em] text-muted">{jobs.length} jobs</span>
+          <span className="text-xs uppercase tracking-[0.24em] text-muted">
+            {!live && <span className="mr-3 normal-case tracking-normal text-orange-300">reconnecting…</span>}
+            {jobs.length} jobs
+          </span>
         </div>
         {jobs.length === 0 ? (
           <p className="rounded-2xl border border-dashed border-border bg-surface/70 px-4 py-8 text-center text-sm text-muted">
@@ -104,42 +121,45 @@ export default function UploadPage() {
           </p>
         ) : (
           <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface/90">
-            {jobs.map((j) => (
-              <li
-                key={j.id}
-                aria-busy={deletingId === j.id}
-                className={`flex items-center justify-between gap-3 px-4 py-4 transition hover:bg-surface-elevated/80 ${deletingId === j.id ? "pointer-events-none" : ""}`}
-              >
-                <Link
-                  href={`/jobs/${j.id}`}
-                  className={`truncate font-medium hover:text-accent-strong ${deletingId === j.id ? "text-muted line-through" : ""}`}
+            {jobs.map((j) => {
+              const isDeleting = deletingId === j.id;
+              const deleteTitle =
+                j.status === "running" ? "Wait for processing to finish" : isDeleting ? "Deleting..." : "Delete video and results";
+
+              return (
+                <li
+                  key={j.id}
+                  aria-busy={isDeleting}
+                  className={`flex items-center justify-between gap-3 px-4 py-4 transition hover:bg-surface-elevated/80 ${isDeleting ? "pointer-events-none" : ""}`}
                 >
-                  {j.originalName}
-                </Link>
-                <div className="flex items-center gap-3 shrink-0">
-                  <StatusBadge status={j.status} />
-                  {j.status === "done" && (
-                    <Link
-                      href={`/jobs/${j.id}/player`}
-                      aria-label={`Play ${j.originalName}`}
-                      title="Play"
-                      className="rounded-full bg-accent p-2 text-white transition hover:bg-accent-strong"
+                  <Link href={`/jobs/${j.id}`} className={`truncate font-medium hover:text-accent-strong ${isDeleting ? "text-muted line-through" : ""}`}>
+                    {j.originalName}
+                  </Link>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <StatusBadge status={j.status} />
+                    {j.status === "done" && (
+                      <Link
+                        href={`/jobs/${j.id}/player`}
+                        aria-label={`Play ${j.originalName}`}
+                        title="Play"
+                        className="rounded-full bg-accent p-2 text-white transition hover:bg-accent-strong"
+                      >
+                        <Play className="h-4 w-4 fill-current" />
+                      </Link>
+                    )}
+                    <button
+                      onClick={() => onDelete(j)}
+                      disabled={j.status === "running" || deletingId !== null}
+                      aria-label={isDeleting ? `Deleting ${j.originalName}` : `Delete ${j.originalName}`}
+                      title={deleteTitle}
+                      className={`rounded-full p-2 text-muted transition hover:bg-accent/10 hover:text-accent-strong disabled:hover:bg-transparent disabled:hover:text-muted ${isDeleting ? "" : "disabled:opacity-40"}`}
                     >
-                      <PlayIcon />
-                    </Link>
-                  )}
-                  <button
-                    onClick={() => onDelete(j)}
-                    disabled={j.status === "running" || deletingId !== null}
-                    aria-label={deletingId === j.id ? `Deleting ${j.originalName}` : `Delete ${j.originalName}`}
-                    title={j.status === "running" ? "Wait for processing to finish" : deletingId === j.id ? "Deleting..." : "Delete video and results"}
-                    className={`rounded-full p-2 text-muted transition hover:bg-accent/10 hover:text-accent-strong disabled:hover:bg-transparent disabled:hover:text-muted ${deletingId === j.id ? "" : "disabled:opacity-40"}`}
-                  >
-                    {deletingId === j.id ? <SpinnerIcon className="h-4 w-4 text-accent-strong" /> : <TrashIcon />}
-                  </button>
-                </div>
-              </li>
-            ))}
+                      {isDeleting ? <LoaderCircle className="h-4 w-4 animate-spin text-accent-strong" /> : <Trash2 className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

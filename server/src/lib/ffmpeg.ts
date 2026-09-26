@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { Interval, VideoMeta } from "shared";
+import { PermanentError } from "./errors";
 
 export interface RunResult {
   stdout: string;
@@ -38,14 +39,19 @@ const parseRate = (r?: string) => {
 };
 
 export async function probe(file: string): Promise<VideoMeta> {
-  const { stdout } = await run("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file]);
-  const info = JSON.parse(stdout);
+  // A file ffprobe cannot read, or one without video/audio, will not improve on retry.
+  let info: any;
+  try {
+    info = JSON.parse((await run("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file])).stdout);
+  } catch (err) {
+    throw new PermanentError(`Not a readable video file: ${(err as Error).message.slice(0, 300)}`);
+  }
   const v = info.streams.find((s: any) => s.codec_type === "video");
   const a = info.streams.find((s: any) => s.codec_type === "audio");
-  if (!v) throw new Error("No video stream found");
-  if (!a) throw new Error("No audio stream found");
+  if (!v) throw new PermanentError("No video stream found");
+  if (!a) throw new PermanentError("No audio stream found");
   const durationSec = Number(info.format.duration);
-  if (!Number.isFinite(durationSec) || durationSec <= 0) throw new Error("Could not read video duration");
+  if (!Number.isFinite(durationSec) || durationSec <= 0) throw new PermanentError("Could not read video duration");
   return {
     durationSec,
     startTimeSec: Number(info.format.start_time ?? 0) || 0,
