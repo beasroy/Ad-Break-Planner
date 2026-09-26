@@ -89,6 +89,20 @@ export const config = {
     overlapSec: 60,
   },
 
+  /** How ad breaks are placed. */
+  placement: {
+    /** "llm": one LLM call per ad slot reads the transcript (with measured silences and shot cuts) and picks
+     *  the line and brand; code still enforces the safety rules. "rules": the older scene → candidate →
+     *  rank → select pipeline. */
+    mode: (process.env.PLACEMENT_MODE === "rules" ? "rules" : "llm") as "llm" | "rules",
+    /** Seconds of dialogue shown before and after each slot, as context. */
+    contextSec: 90,
+    /** Minimum seconds between two ads in llm mode (the rules mode uses pacing.minGapSec). */
+    minGapSec: 300,
+    /** Measured silences shorter than this are not shown to the model. */
+    showSilenceMinSec: 0.5,
+  },
+
   /** Final "is anyone speaking at the cut?" gate for brand-matched cuts. */
   listen: {
     /** Seconds either side of the cut that must be free of speech. */

@@ -1,3 +1,4 @@
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import express, { type ErrorRequestHandler } from "express";
 import cors from "cors";
@@ -38,6 +39,12 @@ async function main() {
 
   const app = express();
   app.use(cors());
+  // Deleting data/ while the server runs leaves it writing to a database that no longer exists on
+  // disk (lost at the next restart). Say so plainly instead of silently losing work.
+  app.use((_req, res, next) => {
+    if (fsSync.existsSync(config.dbPath)) return next();
+    res.status(503).json({ error: "The data folder was deleted while the server was running. Restart the server." });
+  });
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
   app.use(jobsRouter);
   app.use(adsRouter);

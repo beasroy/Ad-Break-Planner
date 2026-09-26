@@ -11,6 +11,7 @@ import { runCandidates } from "../stages/candidates";
 import { runIngest } from "../stages/ingest";
 import { runMatch } from "../stages/match";
 import { runOutputs } from "../stages/outputs";
+import { runPlacement } from "../stages/placement";
 import { runScenes } from "../stages/scenes";
 import { runSelect } from "../stages/select";
 import { runSignals } from "../stages/signals";
@@ -101,6 +102,18 @@ export async function runPipeline(
     stage("signals", () => runSignals(ctx, ingest)),
   ]);
   const transcript = await runTranscribe(ctx, ingest, raw, signals);
+
+  if (ctx.config.placement.mode === "llm") {
+    // One LLM call per transcription chunk picks line + brand; code enforces the safety rules (see
+    // stages/placement.ts). Its work spans what the rules mode splits into scenes / candidates / match / select.
+    await stage("scenes", async () => undefined);
+    await stage("candidates", async () => undefined);
+    const plan = await stage("match", () => runPlacement(ctx, ingest, transcript, signals));
+    await stage("select", async () => undefined);
+    await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, [], [], plan, plan.slots));
+    return { durationSec: ingest.meta.durationSec, breakCount: plan.breaks.length, catalogueHash: catalogue.hash };
+  }
+
   const scenes = await stage("scenes", () => runScenes(ctx, transcript));
   const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals, ingest));
   const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest, transcript.speech ?? []));

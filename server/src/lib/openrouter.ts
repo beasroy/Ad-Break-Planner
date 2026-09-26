@@ -1,4 +1,5 @@
 import { config } from "../config";
+import { appendJsonl } from "./artifacts";
 import { recordModelCall } from "./callContext";
 import { HttpError, createRateLimiter, withRetry } from "./retry";
 
@@ -35,6 +36,8 @@ export async function chatJson(opts: {
   schema: object;
   /** Defaults to the reasoning model. */
   model?: string;
+  /** Appends one JSONL line per attempt (request + response, or request + error) to this file. */
+  logFile?: string;
 }): Promise<unknown> {
   const model = opts.model ?? or.reasonModel;
   return withRetry(
@@ -43,24 +46,21 @@ export async function chatJson(opts: {
     async () => {
       await acquire(model);
       const started = new Date();
+      const body = {
+        model,
+        messages: [
+          { role: "system", content: opts.system },
+          { role: "user", content: opts.user },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
+        },
+        usage: { include: true },
+      };
       let res: any;
       try {
-        res = await post(
-          "/chat/completions",
-          JSON.stringify({
-            model,
-            messages: [
-              { role: "system", content: opts.system },
-              { role: "user", content: opts.user },
-            ],
-            response_format: {
-              type: "json_schema",
-              json_schema: { name: opts.schemaName, strict: true, schema: opts.schema },
-            },
-            usage: { include: true },
-          }),
-          { "Content-Type": "application/json" },
-        );
+        res = await post("/chat/completions", JSON.stringify(body), { "Content-Type": "application/json" });
       } catch (err) {
         recordModelCall({
           provider: "openrouter",
@@ -72,6 +72,14 @@ export async function chatJson(opts: {
           httpStatus: err instanceof HttpError ? err.status : undefined,
           error: (err as Error).message,
         });
+        if (opts.logFile) {
+          await appendJsonl(opts.logFile, {
+            at: started.toISOString(),
+            label: opts.label,
+            request: body,
+            error: (err as Error).message,
+          }).catch(() => {});
+        }
         throw err;
       }
       recordModelCall({
@@ -86,6 +94,9 @@ export async function chatJson(opts: {
         outputTokens: res?.usage?.completion_tokens,
         costUsd: typeof res?.usage?.cost === "number" ? res.usage.cost : undefined,
       });
+      if (opts.logFile) {
+        await appendJsonl(opts.logFile, { at: started.toISOString(), label: opts.label, request: body, response: res }).catch(() => {});
+      }
       const content = res?.choices?.[0]?.message?.content;
       if (typeof content !== "string") throw new Error(`${opts.label}: no message content in response`);
       return JSON.parse(content);

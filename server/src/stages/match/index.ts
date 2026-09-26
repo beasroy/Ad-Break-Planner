@@ -134,7 +134,7 @@ export async function runProgramme(ctx: StageContext, scenes: Scene[]): Promise<
  * 2. Only when VAD is unsure: the audio LLM listens to a 6s clip, `llmVotes` times. Any answer
  *    that hears words, or any failed call, = no ad.
  */
-async function listenCheck(ctx: StageContext, m: MatchedCandidate, wav: string, durationSec: number, speech: Interval[]) {
+export async function listenCheck(ctx: StageContext, m: MatchedCandidate, wav: string, durationSec: number, speech: Interval[]) {
   const t = ctx.config.listen;
   const cut = m.cutTime!;
   let vad;

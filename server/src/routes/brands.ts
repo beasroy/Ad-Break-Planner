@@ -20,12 +20,13 @@ import {
 } from "../catalogue/store";
 import { assertSyntheticName, brandAdsDir, ensureCreativeFiles, normaliseUpload, titleCardCreatives } from "../catalogue/creatives";
 import { PermanentError } from "../lib/errors";
+import { uploadStorage } from "../lib/uploads";
 import { creativeUrl } from "../xml/vast";
 import { rerunAllJobs } from "./jobs";
 
 export const brandsRouter = Router();
 
-const upload = multer({ dest: path.join(config.dataDir, "_uploads"), limits: { fileSize: 500 * 1024 ** 2, files: 3 } });
+const upload = multer({ storage: uploadStorage, limits: { fileSize: 500 * 1024 ** 2, files: 3 } });
 const DEFAULT_DURATIONS = [15, 30];
 
 const list = (v: unknown) =>

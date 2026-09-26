@@ -16,14 +16,14 @@ import { loadCatalogue, withStaleFlag } from "../catalogue/store";
 import { getRepo, type Requester } from "../db";
 import { ARTIFACTS, exists, readJson, writeJson } from "../lib/artifacts";
 import { hashFile } from "../lib/hash";
+import { uploadDir, uploadStorage } from "../lib/uploads";
 import { subscribeJobEvents } from "../jobs/events";
 import { findSourceVideo, jobDir } from "../jobs/runner";
 import type { Break, DebugReport } from "shared";
 import { toTimeOffset, vastUrl } from "../xml/vmap";
 import { creativeUrl } from "../xml/vast";
 
-const uploadDir = path.join(config.dataDir, "_uploads");
-const upload = multer({ dest: uploadDir, limits: { fileSize: config.maxUploadBytes } });
+const upload = multer({ storage: uploadStorage, limits: { fileSize: config.maxUploadBytes } });
 
 export const jobsRouter = Router();
 

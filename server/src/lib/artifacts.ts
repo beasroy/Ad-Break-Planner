@@ -9,6 +9,7 @@ export const ARTIFACTS = {
   candidates: "candidates.json",
   matches: "matches.json",
   programme: "programme.json",
+  placement: "placement.json",
   breaks: "breaks.json",
   vmap: "vmap.xml",
   debug: "debug.json",
@@ -36,6 +37,12 @@ export async function writeFileAtomic(p: string, data: string): Promise<void> {
 }
 
 export const writeJson = (p: string, data: unknown) => writeFileAtomic(p, JSON.stringify(data, null, 2));
+
+/** Appends one line of JSON to a log file, creating its directory if needed. */
+export async function appendJsonl(p: string, entry: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.appendFile(p, `${JSON.stringify(entry)}\n`);
+}
 
 /**
  * Artifacts that depend on inputs other than the video (catalogue, config) carry an

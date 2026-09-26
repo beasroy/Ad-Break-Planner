@@ -12,6 +12,13 @@ export const programmeSystemPrompt = [
 
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
+/** LLM placement mode: the same summary, read straight from the dialogue instead of the scene list. */
+export const STORY_PROMPT_VERSION = 1;
+
+export const storySystemPrompt = programmeSystemPrompt.replace("scene-by-scene summary", "dialogue (with timestamps)").replace("across many scenes", "across the episode");
+
+export const storyUserPrompt = (lines: { start: number; text: string }[]) => lines.map((l) => `[${mmss(l.start)}] ${l.text}`).join("\n");
+
 export const programmeUserPrompt = (scenes: Scene[]) =>
   scenes.map((s) => `[${mmss(s.start)}] ${s.activity} — ${s.summary}`).join("\n");
 

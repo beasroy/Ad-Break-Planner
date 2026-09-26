@@ -180,14 +180,22 @@ export interface ProgrammeContext {
 }
 
 export interface DebugReport {
+  /** LLM placement mode: a plain-language account of how the ads were placed, and the settings that were used. */
+  mode?: "llm";
+  explanation?: string[];
+  settingsUsed?: Record<string, unknown>;
   jobId: string;
   programme?: ProgrammeContext;
   fileHash: string;
   meta: VideoMeta;
   config: unknown;
   transcriptStats: { segments: number; dropped: number; rawFieldsSeen: string[] };
-  scenes: Scene[];
-  candidates: (Candidate | MatchedCandidate)[];
+  /** Rules mode only. */
+  scenes?: Scene[];
+  candidates?: (Candidate | MatchedCandidate)[];
+  /** One entry per candidate (rules mode) or per chunk (LLM mode). */
   selection: SelectionLog[];
   breaks: Break[];
+  /** LLM placement mode: every chunk, what the model was shown, what it answered, and what code accepted or rejected. */
+  placement?: unknown;
 }

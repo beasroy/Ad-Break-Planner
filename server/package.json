@@ -8,6 +8,7 @@
     "start": "tsx --disable-warning=ExperimentalWarning src/index.ts",
     "smoke": "tsx scripts/smoke.ts",
     "stage": "tsx scripts/stage.ts",
+    "placement": "tsx --disable-warning=ExperimentalWarning scripts/placement.ts",
     "creatives": "tsx --disable-warning=ExperimentalWarning scripts/make-creatives.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
