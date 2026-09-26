@@ -20,6 +20,9 @@ export interface QueueConfig {
   attemptTimeoutSec: number;
 }
 
+/** Delay before re-running a job whose worker died or shut down. */
+export const RECOVERY_DELAY_SEC = 5;
+
 export type RunFn = (job: { id: string; fileHash: string }, hooks: PipelineHooks) => Promise<PipelineResult>;
 
 /** Pure: delay before retrying after failed attempt n (1-based): base × 4^(n−1), capped. */
@@ -83,7 +86,8 @@ export function createQueue(opts: { repo: Repo; run: RunFn; config: QueueConfig;
     if (ticking) return;
     ticking = true;
     try {
-      const recovered = repo.recoverStale(q.staleAfterSec, (n) => retryDelaySec(n, q));
+      // A dead worker is not the job's fault: resume it right away instead of waiting out the backoff.
+      const recovered = repo.recoverStale(q.staleAfterSec, () => RECOVERY_DELAY_SEC);
       if (recovered.length) console.warn(`[queue] recovered interrupted jobs: ${recovered.join(", ")}`);
       while (running && active.size < q.concurrency) {
         const job = repo.claimNext(workerId);
@@ -124,7 +128,7 @@ export function createQueue(opts: { repo: Repo; run: RunFn; config: QueueConfig;
     stop() {
       running = false;
       clearTimeout(timer);
-      return repo.recoverStale(0, () => 5, workerId);
+      return repo.recoverStale(0, () => RECOVERY_DELAY_SEC, workerId);
     },
     /** Resolves when every in-flight attempt has finished (tests). */
     idle: () => Promise.all(active.values()).then(() => undefined),

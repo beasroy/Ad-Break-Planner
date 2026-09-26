@@ -4,21 +4,10 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { STAGES, type GetJobResponse, type Job, type StageName } from "shared";
+import { STAGES, type GetJobResponse, type Job } from "shared";
 import { fmtTime, getJob, retryJob, subscribeJobs } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
-import { JobAudit } from "@/components/JobAudit";
-
-const STAGE_LABELS: Record<StageName, string> = {
-  ingest: "Extract audio",
-  transcribe: "Transcribe dialogue",
-  signals: "Detect silences & shot cuts",
-  scenes: "Understand scenes",
-  candidates: "Find safe cut points",
-  match: "Match brands",
-  select: "Apply pacing rules",
-  outputs: "Write VMAP & report",
-};
+import { STAGE_LABELS } from "@/lib/stages";
 
 export default function JobPage() {
   const { id } = useParams<{ id: string }>();
@@ -132,8 +121,6 @@ export default function JobPage() {
         )}
         {job.error && <p className="mt-3 wrap-break-word text-sm text-accent-strong">{job.error}</p>}
       </section>
-
-      <JobAudit jobId={job.id} refreshKey={`${job.status}:${job.attempts}:${job.updatedAt}`} />
 
       {results && (
         <section className="space-y-3">

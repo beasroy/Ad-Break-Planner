@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { withStaleFlag } from "../catalogue/current";
 import { publishJobEvent } from "../jobs/events";
 import { createRepo, openDb, type Repo } from "./repo";
 
@@ -14,7 +15,7 @@ export function initDb(file: string): Repo {
   const r: Repo = createRepo(openDb(file), undefined, (ids) => {
     for (const id of ids) {
       const job = r.getJob(id);
-      publishJobEvent(job ? { type: "job", job } : { type: "deleted", id });
+      publishJobEvent(job ? { type: "job", job: withStaleFlag(job) } : { type: "deleted", id });
     }
   });
   repo = r;

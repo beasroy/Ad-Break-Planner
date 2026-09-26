@@ -9,6 +9,7 @@ import { createQueue } from "./jobs/queue";
 import { runPipeline } from "./jobs/runner";
 import { importLegacyJobs, jobsRouter, queueSignal } from "./routes/jobs";
 import { adsRouter } from "./routes/ads";
+import { brandsRouter } from "./routes/brands";
 
 async function main() {
   await assertFfmpegAvailable();
@@ -39,6 +40,7 @@ async function main() {
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
   app.use(jobsRouter);
   app.use(adsRouter);
+  app.use(brandsRouter);
 
   const onError: ErrorRequestHandler = (err, _req, res, _next) => {
     console.error(err);

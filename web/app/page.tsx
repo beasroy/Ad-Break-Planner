@@ -7,6 +7,7 @@ import { LoaderCircle, Play, Trash2 } from "lucide-react";
 import type { Job } from "shared";
 import { deleteJob, subscribeJobs, uploadVideo } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { currentStage } from "@/lib/stages";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -132,10 +133,24 @@ export default function UploadPage() {
                   aria-busy={isDeleting}
                   className={`flex items-center justify-between gap-3 px-4 py-4 transition hover:bg-surface-elevated/80 ${isDeleting ? "pointer-events-none" : ""}`}
                 >
-                  <Link href={`/jobs/${j.id}`} className={`truncate font-medium hover:text-accent-strong ${isDeleting ? "text-muted line-through" : ""}`}>
-                    {j.originalName}
-                  </Link>
+                  <div className="min-w-0 space-y-0.5">
+                    <Link
+                      href={`/jobs/${j.id}`}
+                      className={`block truncate font-medium hover:text-accent-strong ${isDeleting ? "text-muted line-through" : ""}`}
+                    >
+                      {j.originalName}
+                    </Link>
+                    <JobProgress job={j} />
+                  </div>
                   <div className="flex items-center gap-3 shrink-0">
+                    {j.catalogueStale && (
+                      <span
+                        title="Brands changed since this video was processed. Re-run it from the Brands page."
+                        className="rounded-full border border-orange-500/20 bg-orange-500/15 px-2 py-0.5 text-xs font-medium text-orange-300"
+                      >
+                        catalogue changed
+                      </span>
+                    )}
                     <StatusBadge status={j.status} />
                     {j.status === "done" && (
                       <Link
@@ -165,4 +180,27 @@ export default function UploadPage() {
       </section>
     </div>
   );
+}
+
+/** One muted line under a job: the stage it is on, or when it will retry. */
+function JobProgress({ job }: Readonly<{ job: Job }>) {
+  const stage = job.status === "running" ? currentStage(job) : undefined;
+  if (stage) {
+    return (
+      <p className="flex items-center gap-2 truncate text-xs text-muted">
+        <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-amber-200" />
+        <span className="truncate">{stage.label}</span>
+        <span className="shrink-0 font-mono">
+          {stage.step}/{stage.total}
+        </span>
+      </p>
+    );
+  }
+  if (job.status === "retrying" && job.nextRunAt) {
+    return <p className="truncate text-xs text-orange-300">Retrying at {new Date(job.nextRunAt).toLocaleTimeString()}</p>;
+  }
+  if (job.status === "error" && job.error) {
+    return <p className="truncate text-xs text-accent-strong">{job.error}</p>;
+  }
+  return null;
 }

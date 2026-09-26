@@ -90,4 +90,7 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX model_calls_job ON model_calls (job_id, id);
   `,
+  /* 2: which brand catalogue a finished job used, so a catalogue change can mark it stale */ `
+  ALTER TABLE jobs ADD COLUMN catalogue_hash TEXT;
+  `,
 ];

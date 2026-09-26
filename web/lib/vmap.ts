@@ -11,6 +11,9 @@ export interface VastAd {
   title: string;
   mediaUrl: string;
   durationSec: number;
+  /** Ad copy the player draws over the creative (VAST Description / adCopy extension). */
+  headline?: string;
+  tagline?: string;
 }
 
 /** "HH:MM:SS.mmm" → seconds. Non-time offsets (start/end/percent) aren't used by our VMAP. */
@@ -42,7 +45,13 @@ export function parseVast(xml: string): VastAd {
   const text = (name: string) => byLocalName(doc, name)[0]?.textContent?.trim() ?? "";
   const mediaUrl = text("MediaFile");
   if (!mediaUrl) throw new Error("VAST has no MediaFile");
-  return { title: text("AdTitle"), mediaUrl, durationSec: parseTimeOffset(text("Duration")) ?? 0 };
+  return {
+    title: text("AdTitle"),
+    mediaUrl,
+    durationSec: parseTimeOffset(text("Duration")) ?? 0,
+    headline: text("Headline") || undefined,
+    tagline: text("Description") || undefined,
+  };
 }
 
 export async function loadAdSchedule(vmapUrl: string): Promise<(VmapBreak & { ad: VastAd })[]> {

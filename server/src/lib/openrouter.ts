@@ -93,3 +93,38 @@ export async function chatJson(opts: {
     or.rateLimitRetries,
   );
 }
+
+/** One generated image (JPEG/PNG bytes) from a text prompt. */
+export async function generateImage(opts: { label: string; prompt: string; model?: string }): Promise<{ bytes: Buffer; ext: string }> {
+  const model = opts.model ?? or.imageModel;
+  return withRetry(opts.label, or.retries, async () => {
+    await acquire(model);
+    const started = new Date();
+    const log = (ok: boolean, extra: Record<string, unknown>) =>
+      recordModelCall({
+        provider: "openrouter",
+        model,
+        label: opts.label,
+        startedAt: started.toISOString(),
+        latencyMs: Date.now() - started.getTime(),
+        ok,
+        ...extra,
+      });
+    let res: any;
+    try {
+      res = await post(
+        "/chat/completions",
+        JSON.stringify({ model, modalities: ["image", "text"], messages: [{ role: "user", content: opts.prompt }], usage: { include: true } }),
+        { "Content-Type": "application/json" },
+      );
+    } catch (err) {
+      log(false, { httpStatus: err instanceof HttpError ? err.status : undefined, error: (err as Error).message });
+      throw err;
+    }
+    log(true, { httpStatus: 200, outputTokens: res?.usage?.completion_tokens, costUsd: res?.usage?.cost });
+    const url: string | undefined = res?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+    const m = url?.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!m) throw new Error(`${opts.label}: no image in response`);
+    return { bytes: Buffer.from(m[2], "base64"), ext: m[1] === "jpeg" ? "jpg" : m[1] };
+  });
+}

@@ -43,6 +43,8 @@ export const config = {
      *  Good Bengali text, but timestamps can drift by seconds. */
     transcribeModel: process.env.MODEL_TRANSCRIBE ?? "google/gemini-3.8-flash",
     reasonModel: process.env.MODEL_REASON ?? "openai/gpt-5.6-luna",
+    /** Generates ad images for brands created on the brands page (about $0.03 per image). */
+    imageModel: process.env.MODEL_IMAGE ?? "google/gemini-3.1-flash-lite-image",
     requestTimeoutMs: 90_000,
     concurrency: 4,
     retries: 1,

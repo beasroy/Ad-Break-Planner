@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { writeFileAtomic } from "../lib/artifacts";
 import type { Brand, Catalogue } from "shared";
 
 const RawCreative = z.object({
@@ -20,6 +21,8 @@ const RawBrand = z.object({
   target_contexts: z.array(z.string()).default([]),
   negative_contexts: z.array(z.string()).default([]),
   creatives: z.array(RawCreative).min(1),
+  headline: z.string().optional(),
+  tagline: z.string().optional(),
 });
 
 const RawCatalogue = z.union([z.array(RawBrand), z.object({ brands: z.array(RawBrand) })]);
@@ -47,6 +50,8 @@ export function parseCatalogue(raw: unknown, catalogueDir: string): Catalogue {
         language: c.language,
         file: path.resolve(catalogueDir, c.url),
       })),
+      ...(b.headline && { headline: b.headline }),
+      ...(b.tagline && { tagline: b.tagline }),
     };
   });
 
@@ -58,4 +63,56 @@ export function parseCatalogue(raw: unknown, catalogueDir: string): Catalogue {
 export async function loadCatalogue(cataloguePath: string): Promise<Catalogue> {
   const raw = JSON.parse(await fs.readFile(cataloguePath, "utf8"));
   return parseCatalogue(raw, path.dirname(cataloguePath));
+}
+
+// ---- Editing (brands page). Writes are serialised and the result is validated before it is saved.
+
+export type RawBrandInput = z.input<typeof RawBrand>;
+
+let writing: Promise<unknown> = Promise.resolve();
+function serialised<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writing.then(fn);
+  writing = next.catch(() => undefined);
+  return next;
+}
+
+async function readRaw(cataloguePath: string): Promise<{ list: RawBrandInput[]; wrapped: boolean }> {
+  const raw = JSON.parse(await fs.readFile(cataloguePath, "utf8"));
+  return Array.isArray(raw) ? { list: raw, wrapped: false } : { list: raw.brands, wrapped: true };
+}
+
+async function writeRaw(cataloguePath: string, list: RawBrandInput[], wrapped: boolean) {
+  const out = wrapped ? { brands: list } : list;
+  parseCatalogue(out, path.dirname(cataloguePath)); // never save a catalogue the loader would reject
+  await writeFileAtomic(cataloguePath, JSON.stringify(out, null, 2) + "\n");
+}
+
+/** Pure: a new brand id from its display name, unique among `taken` (brand_<slug>, brand_<slug>_2, ...). */
+export function brandIdFor(name: string, taken: Set<string>): string {
+  const slug = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "custom";
+  let id = `brand_${slug}`;
+  for (let n = 2; taken.has(id); n++) id = `brand_${slug}_${n}`;
+  return id;
+}
+
+export const catalogueBrandIds = async (cataloguePath: string) =>
+  new Set((await readRaw(cataloguePath)).list.map((b) => b.brand_id));
+
+export function addBrand(cataloguePath: string, brand: RawBrandInput): Promise<void> {
+  return serialised(async () => {
+    const { list, wrapped } = await readRaw(cataloguePath);
+    if (list.some((b) => b.brand_id === brand.brand_id)) throw new Error(`brand ${brand.brand_id} already exists`);
+    await writeRaw(cataloguePath, [...list, brand], wrapped);
+  });
+}
+
+export function removeBrand(cataloguePath: string, brandId: string): Promise<boolean> {
+  return serialised(async () => {
+    const { list, wrapped } = await readRaw(cataloguePath);
+    const rest = list.filter((b) => b.brand_id !== brandId);
+    if (rest.length === list.length) return false;
+    if (!rest.length) throw new Error("the catalogue needs at least one brand");
+    await writeRaw(cataloguePath, rest, wrapped);
+    return true;
+  });
 }

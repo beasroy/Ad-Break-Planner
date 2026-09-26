@@ -1,6 +1,14 @@
 // Typed client for the server API. Endpoint shapes are PROVISIONAL (see shared/src/api.ts)
 // until API_SPEC.md exists.
-import type { CreateJobResponse, GetJobResponse, Job, JobAuditResponse, JobStreamEvent, ListJobsResponse } from "shared";
+import type {
+  BrandChangeResponse,
+  CreateJobResponse,
+  GetJobResponse,
+  Job,
+  JobStreamEvent,
+  ListBrandsResponse,
+  ListJobsResponse,
+} from "shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -47,14 +55,30 @@ export function subscribeJobs(
   return () => es.close();
 }
 
-export const getJobAudit = (id: string) => getJson<JobAuditResponse>(`/api/jobs/${encodeURIComponent(id)}/audit`);
-
 export async function retryJob(id: string): Promise<CreateJobResponse> {
   const res = await fetch(`${API_URL}/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error ?? `retry failed: HTTP ${res.status}`);
   return body as CreateJobResponse;
 }
+
+export const listBrands = () => getJson<ListBrandsResponse>("/api/brands");
+
+async function sendJson<T>(path: string, init: RequestInit): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, init);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? `${path}: HTTP ${res.status}`);
+  return body as T;
+}
+
+/** Creates a brand (multipart: fields + optional ad videos). Takes up to a minute when generating creatives. */
+export const createBrand = (form: FormData) => sendJson<BrandChangeResponse>("/api/brands", { method: "POST", body: form });
+
+export const deleteBrand = (id: string) =>
+  sendJson<BrandChangeResponse>(`/api/brands/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+/** Re-processes every video against the current catalogue (cached stages are reused). */
+export const rerunAllJobs = () => sendJson<{ requeuedJobs: string[] }>("/api/jobs/rerun-all", { method: "POST" });
 
 export async function deleteJob(id: string): Promise<void> {
   const res = await fetch(`${API_URL}/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });

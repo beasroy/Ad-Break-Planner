@@ -207,7 +207,7 @@ describe("queue", () => {
       hooks.onStage("ingest", { state: "running", startedAt: "2026-09-26T10:00:00.000Z" });
       if (calls === 1) throw new StageError("ingest", new Error("OpenRouter HTTP 503"));
       hooks.onStage("ingest", { state: "done", startedAt: "2026-09-26T10:00:00.000Z", finishedAt: "2026-09-26T10:00:02.000Z" });
-      return { durationSec: 1500, breakCount: 2 };
+      return { durationSec: 1500, breakCount: 2, catalogueHash: "cat1" };
     };
     const q = createQueue({ repo, run, config: Q, workerId: "w1" });
     q.start();
@@ -256,7 +256,7 @@ describe("queue", () => {
     const gate = new Promise<void>((r) => (release = r));
     const run: RunFn = async () => {
       await gate;
-      return { durationSec: 1, breakCount: 0 };
+      return { durationSec: 1, breakCount: 0, catalogueHash: "cat1" };
     };
     const q = createQueue({ repo, run, config: { ...Q, concurrency: 2 }, workerId: "w1" });
     q.start();

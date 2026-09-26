@@ -13,6 +13,7 @@ import type {
 } from "shared";
 import { config } from "../config";
 import { loadCatalogue } from "../catalogue/loader";
+import { withStaleFlag } from "../catalogue/current";
 import { getRepo, type Requester } from "../db";
 import { ARTIFACTS, exists, readJson, writeJson } from "../lib/artifacts";
 import { hashFile } from "../lib/hash";
@@ -52,6 +53,14 @@ export async function importLegacyJobs() {
     }
   }
   if (imported) console.log(`Imported ${imported} job(s) from data/ into the database`);
+  // Jobs finished before catalogue hashes were stored: take it from their debug.json.
+  for (const job of repo.listJobs()) {
+    if (job.status !== "done" || job.catalogueHash) continue;
+    const debugPath = path.join(jobDir(job.fileHash), ARTIFACTS.debug);
+    if (!(await exists(debugPath))) continue;
+    const hash = ((await readJson<DebugReport>(debugPath)).config as { catalogueHash?: unknown } | undefined)?.catalogueHash;
+    if (typeof hash === "string") repo.setCatalogueHash(job.id, hash);
+  }
 }
 
 // PROVISIONAL
@@ -87,7 +96,7 @@ jobsRouter.post("/api/jobs", upload.single("video"), async (req, res, next) => {
 
 // PROVISIONAL
 jobsRouter.get("/api/jobs", (_req, res) => {
-  res.json({ jobs: getRepo().listJobs() } satisfies ListJobsResponse);
+  res.json({ jobs: getRepo().listJobs().map(withStaleFlag) } satisfies ListJobsResponse);
 });
 
 /** Keeps idle connections open through proxies that close silent streams. */
@@ -106,7 +115,7 @@ jobsRouter.get("/api/events", (req, res) => {
 
   const repo = getRepo();
   const one = jobId ? repo.getJob(jobId) : undefined;
-  send({ type: "snapshot", jobs: jobId ? (one ? [one] : []) : repo.listJobs() });
+  send({ type: "snapshot", jobs: (jobId ? (one ? [one] : []) : repo.listJobs()).map(withStaleFlag) });
 
   const unsubscribe = subscribeJobEvents((e) => {
     if (!jobId || (e.type === "job" ? e.job.id : e.id) === jobId) send(e);
@@ -148,6 +157,19 @@ jobsRouter.post("/api/jobs/:id/retry", (req, res) => {
   res.json({ job: r.job! } satisfies CreateJobResponse);
 });
 
+/** Re-queues every finished or failed job (after a catalogue change). Returns the re-queued ids. */
+export function rerunAllJobs(reason: string, requester?: Requester): string[] {
+  const repo = getRepo();
+  const ids = repo.listJobs().filter((j) => repo.rerun(j.id, config.queue.maxAttempts, reason, requester)).map((j) => j.id);
+  if (ids.length) queueSignal.notify();
+  return ids;
+}
+
+// PROVISIONAL: re-run every processed video against the current brand catalogue.
+jobsRouter.post("/api/jobs/rerun-all", (req, res) => {
+  res.json({ requeuedJobs: rerunAllJobs("manual re-run with the current catalogue", requester(req)) });
+});
+
 // PROVISIONAL: attempts, the append-only event trail, and every model call with latency and cost.
 jobsRouter.get("/api/jobs/:id/audit", (req, res) => {
   const audit = getRepo().getAudit(req.params.id);
@@ -173,7 +195,7 @@ jobsRouter.get("/api/jobs/:id", async (req, res, next) => {
     const loaded = await loadBreaks(job);
     const base = `${config.publicBaseUrl}/api/jobs/${job.id}`;
     const body: GetJobResponse = {
-      job,
+      job: withStaleFlag(job),
       results: loaded && {
         videoUrl: `${base}/video`,
         vmapUrl: `${base}/vmap.xml`,

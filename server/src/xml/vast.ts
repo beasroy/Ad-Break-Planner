@@ -11,7 +11,7 @@ export function buildVast(brand: Brand, creative: Creative, baseUrl: string): st
   <Ad id="${escapeXml(brand.id)}">
     <InLine>
       <AdSystem>AdBreakPlanner</AdSystem>
-      <AdTitle>${escapeXml(brand.name)}</AdTitle>
+      <AdTitle>${escapeXml(brand.name)}</AdTitle>${brand.tagline ? `\n      <Description>${escapeXml(brand.tagline)}</Description>` : ""}
       <Impression><![CDATA[${baseUrl}/api/impression?brand=${encodeURIComponent(brand.id)}]]></Impression>
       <Creatives>
         <Creative id="${escapeXml(creative.id)}" sequence="1">
@@ -22,7 +22,11 @@ export function buildVast(brand: Brand, creative: Creative, baseUrl: string): st
             </MediaFiles>
           </Linear>
         </Creative>
-      </Creatives>
+      </Creatives>${
+        brand.headline
+          ? `\n      <Extensions>\n        <Extension type="adCopy"><Headline>${escapeXml(brand.headline)}</Headline></Extension>\n      </Extensions>`
+          : ""
+      }
     </InLine>
   </Ad>
 </VAST>

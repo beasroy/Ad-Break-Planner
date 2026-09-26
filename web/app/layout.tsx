@@ -29,6 +29,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             </Link>
             <span className="hidden h-4 w-px bg-border sm:block" />
             <span className="text-sm text-muted">ad break planner</span>
+            <nav className="ml-auto flex items-center gap-5 text-sm font-medium text-muted">
+              <Link href="/" className="transition hover:text-foreground">
+                Videos
+              </Link>
+              <Link href="/brands" className="transition hover:text-foreground">
+                Brands
+              </Link>
+            </nav>
           </div>
         </header>
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">{children}</main>

@@ -134,6 +134,15 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
             <div className="absolute top-3 right-3 rounded-full border border-white/10 bg-black/70 px-3 py-1 text-xs text-white">
               resumes at {fmtTime(activeAd.timeSec)}
             </div>
+            {(activeAd.ad.headline || activeAd.ad.tagline) && (
+              <div className="pointer-events-none absolute inset-y-0 left-0 flex w-1/2 flex-col justify-end bg-linear-to-r from-black/75 via-black/40 to-transparent p-6 sm:p-10">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-accent-strong">{activeAd.ad.title}</p>
+                {activeAd.ad.headline && (
+                  <p className="mt-2 text-2xl font-semibold leading-tight text-white sm:text-4xl">{activeAd.ad.headline}</p>
+                )}
+                {activeAd.ad.tagline && <p className="mt-2 text-sm text-white/80 sm:text-base">{activeAd.ad.tagline}</p>}
+              </div>
+            )}
           </div>
         )}
       </div>

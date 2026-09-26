@@ -124,6 +124,7 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
       sizeBytes: opt(r.size_bytes),
       durationSec: opt(r.duration_sec),
       breakCount: opt(r.break_count),
+      catalogueHash: opt(r.catalogue_hash),
     };
   }
 
@@ -296,16 +297,29 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
     },
 
     /** Closes a successful attempt. Ignored if this worker no longer holds the job. */
-    succeed(jobId: string, workerId: string, attempt: number, result: { durationSec?: number; breakCount?: number }) {
+    succeed(
+      jobId: string,
+      workerId: string,
+      attempt: number,
+      result: { durationSec?: number; breakCount?: number; catalogueHash?: string },
+    ) {
       return tx(() => {
         const t = now();
         const changed = db
           .prepare(
             `UPDATE jobs SET status = 'done', locked_by = NULL, heartbeat_at = NULL, last_error = NULL,
-               finished_at = @t, updated_at = @t, duration_sec = @dur, break_count = @breaks
+               finished_at = @t, updated_at = @t, duration_sec = @dur, break_count = @breaks,
+               catalogue_hash = COALESCE(@cat, catalogue_hash)
              WHERE id = @id AND status = 'running' AND locked_by = @worker`,
           )
-          .run({ id: jobId, worker: workerId, t, dur: nul(result.durationSec), breaks: nul(result.breakCount) }).changes;
+          .run({
+            id: jobId,
+            worker: workerId,
+            t,
+            dur: nul(result.durationSec),
+            breaks: nul(result.breakCount),
+            cat: nul(result.catalogueHash),
+          }).changes;
         if (!changed) return false;
         db.prepare(
           "UPDATE job_attempts SET status = 'succeeded', finished_at = ? WHERE job_id = ? AND attempt = ?",
@@ -412,6 +426,25 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
         audit({ jobId, actor: "api", type: "job.requeued", requester, detail: { reason: "manual retry" } });
         return { job: toJob(q.job.get(jobId) as Row) };
       });
+    },
+
+    /**
+     * Re-run a finished or failed job (e.g. after the brand catalogue changed). Cached stages make
+     * it cheap; only what depends on the change re-runs. Queued/running jobs are left alone.
+     */
+    rerun(jobId: string, maxAttempts: number, reason: string, requester?: Requester): boolean {
+      return tx(() => {
+        const r = q.job.get(jobId) as Row | undefined;
+        if (!r || !["done", "error"].includes(r.status)) return false;
+        requeue(r, maxAttempts);
+        audit({ jobId, actor: "api", type: "job.requeued", requester, detail: { reason, previousStatus: r.status } });
+        return true;
+      });
+    },
+
+    /** Backfill for jobs finished before catalogue hashes were stored. */
+    setCatalogueHash(jobId: string, hash: string) {
+      db.prepare("UPDATE jobs SET catalogue_hash = ? WHERE id = ? AND catalogue_hash IS NULL").run(hash, jobId);
     },
 
     /** Soft delete: the row and its audit trail stay; the job disappears from the API. */
@@ -577,6 +610,10 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
     retry: (...a: Parameters<typeof api.retry>) => {
       const r = api.retry(...a);
       return changed(r, r.job ? [a[0]] : []);
+    },
+    rerun: (...a: Parameters<typeof api.rerun>) => {
+      const r = api.rerun(...a);
+      return changed(r, r ? [a[0]] : []);
     },
     markDeleted: (...a: Parameters<typeof api.markDeleted>) => {
       const r = api.markDeleted(...a);

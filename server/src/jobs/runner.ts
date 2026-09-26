@@ -37,6 +37,7 @@ export interface PipelineHooks {
 export interface PipelineResult {
   durationSec: number;
   breakCount: number;
+  catalogueHash: string;
 }
 
 /** The stage a pipeline error came from, for the attempt record. */
@@ -105,5 +106,5 @@ export async function runPipeline(
   const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest, transcript.speech ?? []));
   const selection = await stage("select", () => runSelect(ctx, matched, ingest.meta.durationSec));
   await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, scenes, matched, selection));
-  return { durationSec: ingest.meta.durationSec, breakCount: selection.breaks.length };
+  return { durationSec: ingest.meta.durationSec, breakCount: selection.breaks.length, catalogueHash: catalogue.hash };
 }

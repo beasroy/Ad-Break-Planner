@@ -14,6 +14,9 @@ export interface Brand {
   targetContexts: string[];
   negativeContexts: string[];
   creatives: Creative[];
+  /** Short ad copy shown over the creative by the player (VAST Description / extension). */
+  headline?: string;
+  tagline?: string;
 }
 
 export interface Catalogue {

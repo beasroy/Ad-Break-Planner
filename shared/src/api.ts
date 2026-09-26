@@ -55,3 +55,29 @@ export type JobStreamEvent =
   | { type: "snapshot"; jobs: Job[] }
   | { type: "job"; job: Job }
   | { type: "deleted"; id: string };
+
+/** GET /api/brands */
+export interface BrandSummary {
+  id: string;
+  name: string;
+  category: string;
+  targetContexts: string[];
+  negativeContexts: string[];
+  headline?: string;
+  tagline?: string;
+  creatives: { id: string; durationSec: number; language: string; url: string }[];
+}
+
+export interface ListBrandsResponse {
+  brands: BrandSummary[];
+  /** Hash of the current catalogue; a job processed with a different one is stale. */
+  catalogueHash: string;
+}
+
+/** POST /api/brands, DELETE /api/brands/:id: the catalogue change and the jobs re-queued because of it. */
+export interface BrandChangeResponse {
+  brand?: BrandSummary;
+  requeuedJobs: string[];
+  /** Set when a creative could not be generated and a plain placeholder was used instead. */
+  warning?: string;
+}

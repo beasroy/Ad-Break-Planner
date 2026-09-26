@@ -43,6 +43,10 @@ export interface Job {
   sizeBytes?: number;
   durationSec?: number;
   breakCount?: number;
+  /** Hash of the brand catalogue the job was last processed with. */
+  catalogueHash?: string;
+  /** Processed with a different brand catalogue than the current one: re-run before trusting its breaks. */
+  catalogueStale?: boolean;
 }
 
 export type AuditActor = "api" | "worker" | "system";
