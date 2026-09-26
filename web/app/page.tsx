@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Job } from "shared";
-import { listJobs, uploadVideo } from "@/lib/api";
+import { deleteJob, listJobs, uploadVideo } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
+import { PlayIcon, SpinnerIcon, TrashIcon } from "@/components/Icons";
 
 export default function UploadPage() {
   const router = useRouter();
@@ -13,12 +14,27 @@ export default function UploadPage() {
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     listJobs()
       .then((r) => setJobs(r.jobs))
       .catch((e: Error) => setError(e.message));
   }, []);
+
+  async function onDelete(job: Job) {
+    if (!confirm(`Delete "${job.originalName}"? This removes the video and all its results.`)) return;
+    setError(null);
+    setDeletingId(job.id);
+    try {
+      await deleteJob(job.id);
+      setJobs((js) => js.filter((j) => j.id !== job.id));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   async function onUpload() {
     if (!file) return;
@@ -89,17 +105,38 @@ export default function UploadPage() {
         ) : (
           <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface/90">
             {jobs.map((j) => (
-              <li key={j.id} className="flex items-center justify-between gap-3 px-4 py-4 transition hover:bg-surface-elevated/80">
-                <Link href={`/jobs/${j.id}`} className="truncate font-medium hover:text-accent-strong">
+              <li
+                key={j.id}
+                aria-busy={deletingId === j.id}
+                className={`flex items-center justify-between gap-3 px-4 py-4 transition hover:bg-surface-elevated/80 ${deletingId === j.id ? "pointer-events-none" : ""}`}
+              >
+                <Link
+                  href={`/jobs/${j.id}`}
+                  className={`truncate font-medium hover:text-accent-strong ${deletingId === j.id ? "text-muted line-through" : ""}`}
+                >
                   {j.originalName}
                 </Link>
                 <div className="flex items-center gap-3 shrink-0">
                   <StatusBadge status={j.status} />
                   {j.status === "done" && (
-                    <Link href={`/jobs/${j.id}/player`} className="text-sm font-medium text-accent-strong hover:text-white">
-                      Play
+                    <Link
+                      href={`/jobs/${j.id}/player`}
+                      aria-label={`Play ${j.originalName}`}
+                      title="Play"
+                      className="rounded-full bg-accent p-2 text-white transition hover:bg-accent-strong"
+                    >
+                      <PlayIcon />
                     </Link>
                   )}
+                  <button
+                    onClick={() => onDelete(j)}
+                    disabled={j.status === "running" || deletingId !== null}
+                    aria-label={deletingId === j.id ? `Deleting ${j.originalName}` : `Delete ${j.originalName}`}
+                    title={j.status === "running" ? "Wait for processing to finish" : deletingId === j.id ? "Deleting..." : "Delete video and results"}
+                    className={`rounded-full p-2 text-muted transition hover:bg-accent/10 hover:text-accent-strong disabled:hover:bg-transparent disabled:hover:text-muted ${deletingId === j.id ? "" : "disabled:opacity-40"}`}
+                  >
+                    {deletingId === j.id ? <SpinnerIcon className="h-4 w-4 text-accent-strong" /> : <TrashIcon />}
+                  </button>
                 </div>
               </li>
             ))}

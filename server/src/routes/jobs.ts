@@ -8,7 +8,7 @@ import { loadCatalogue } from "../catalogue/loader";
 import { ARTIFACTS, exists, readJson, writeJson } from "../lib/artifacts";
 import { hashFile } from "../lib/hash";
 import { findSourceVideo, jobDir, runPipeline } from "../jobs/runner";
-import { createJob, getJob, jobIdForHash, listJobs } from "../jobs/store";
+import { createJob, getJob, jobIdForHash, listJobs, removeJob } from "../jobs/store";
 import type { Break, DebugReport } from "shared";
 import { toTimeOffset, vastUrl } from "../xml/vmap";
 import { creativeUrl } from "../xml/vast";
@@ -72,6 +72,21 @@ const withJob = (id: string, res: any): Job | undefined => {
   if (!job) res.status(404).json({ error: "job not found" });
   return job;
 };
+
+// PROVISIONAL: deletes the job and everything in its folder (source video, cached stages, outputs).
+jobsRouter.delete("/api/jobs/:id", async (req, res, next) => {
+  try {
+    const job = withJob(req.params.id, res);
+    if (!job) return;
+    // A running pipeline would keep writing into the folder we are removing.
+    if (job.status === "running") return res.status(409).json({ error: "job is still processing" });
+    removeJob(job.id);
+    await fs.rm(jobDir(job.fileHash), { recursive: true, force: true });
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
 
 async function loadBreaks(job: Job): Promise<{ breaks: (Break & { brandName: string })[]; durationSec: number } | undefined> {
   const dir = jobDir(job.fileHash);

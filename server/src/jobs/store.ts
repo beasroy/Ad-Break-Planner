@@ -18,6 +18,7 @@ export function createJob(fileHash: string, originalName: string): Job {
 }
 
 export const getJob = (id: string) => jobs.get(id);
+export const removeJob = (id: string) => jobs.delete(id);
 export const listJobs = () => [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
 export function setStage(job: Job, stage: StageName, patch: Partial<StageStatus>) {

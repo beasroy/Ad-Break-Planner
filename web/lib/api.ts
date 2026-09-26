@@ -13,6 +13,14 @@ async function getJson<T>(path: string): Promise<T> {
 export const listJobs = () => getJson<ListJobsResponse>("/api/jobs");
 export const getJob = (id: string) => getJson<GetJobResponse>(`/api/jobs/${encodeURIComponent(id)}`);
 
+export async function deleteJob(id: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `delete failed: HTTP ${res.status}`);
+  }
+}
+
 /** Multipart upload with progress (fetch has no upload progress, so XHR). */
 export function uploadVideo(file: File, onProgress: (fraction: number) => void): Promise<CreateJobResponse> {
   return new Promise((resolve, reject) => {
