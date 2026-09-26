@@ -80,7 +80,29 @@ export interface BrandChangeResponse {
   requeuedJobs: string[];
 }
 
-/** POST /api/brands/import */
+/** POST /api/brands/import: the import runs in the background; poll GET /api/brands/import/:importId. */
+export interface ImportStartedResponse {
+  importId: string;
+}
+
+/** GET /api/brands/import/:importId */
+export interface ImportProgress {
+  status: "running" | "done" | "error";
+  /** "checking": names are checked to be synthetic. "brands": ads are made brand by brand. "saving": the catalogue is written. */
+  phase: "checking" | "brands" | "saving";
+  /** Brands in the file that are new or changed. */
+  total: number;
+  /** Names of the brands finished so far, in order. */
+  ready: string[];
+  /** The brand being worked on now. */
+  working?: string;
+  /** Set when status is "done". */
+  result?: ImportCatalogueResponse;
+  /** Set when status is "error". */
+  error?: string;
+}
+
+/** The result of an import. */
 export interface ImportCatalogueResponse {
   added: string[];
   updated: string[];

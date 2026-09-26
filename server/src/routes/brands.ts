@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Router, type Request } from "express";
 import multer from "multer";
-import type { BrandChangeResponse, BrandSummary, ImportCatalogueResponse, ListBrandsResponse } from "shared";
+import type { BrandChangeResponse, BrandSummary, ImportCatalogueResponse, ImportStartedResponse, ListBrandsResponse } from "shared";
 import { config } from "../config";
 import { brandIdFor } from "../catalogue/loader";
 import {
@@ -18,7 +18,8 @@ import {
   planImport,
   removeBrand,
 } from "../catalogue/store";
-import { assertSyntheticName, brandAdsDir, ensureCreativeFiles, normaliseUpload, titleCardCreatives } from "../catalogue/creatives";
+import { assertSyntheticName, brandAdsDir, normaliseUpload, titleCardCreatives } from "../catalogue/creatives";
+import { getImportProgress, importRunning, startImport } from "../catalogue/importTask";
 import { PermanentError } from "../lib/errors";
 import { uploadStorage } from "../lib/uploads";
 import { creativeUrl } from "../xml/vast";
@@ -152,10 +153,12 @@ brandsRouter.delete("/api/brands/:id", async (req, res, next) => {
 const importUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 ** 2, files: 1 } });
 
 // PROVISIONAL: multipart. file: catalogue (brands.json format); mode: merge | replace.
+// Validates the file, then imports in the background (202 + importId); poll GET /api/brands/import/:id.
 // Creatives whose files do not exist get a title-card ad (brand name, category, contexts).
 brandsRouter.post("/api/brands/import", importUpload.single("catalogue"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: "multipart field 'catalogue' (a JSON file) is required" });
+    if (importRunning()) return res.status(409).json({ error: "Another import is still running. Wait for it to finish." });
     const mode = req.body.mode === "replace" ? "replace" : "merge";
     let raw: unknown;
     try {
@@ -171,27 +174,34 @@ brandsRouter.post("/api/brands/import", importUpload.single("catalogue"), async 
     }
     // Synthetic names only (auto-disqualifier): every new or renamed brand is checked.
     const current = new Map(exportCatalogue().map((b) => [b.brand_id, b.display_name]));
-    for (const b of plan.next) {
-      if (current.get(b.brand_id) !== b.display_name) await assertSyntheticName(b.display_name, b.category ?? "");
-    }
-    const madeCreatives = await ensureCreativeFiles(plan.next, catalogueDir());
-    try {
-      applyImport(plan, mode, requester(req), req.file.originalname);
-    } catch (err) {
-      throw new PermanentError(`Not a valid catalogue: ${formatZod(err)}`);
-    }
-    const requeuedJobs = rerunAllJobs(`catalogue imported (${mode})`, requester(req));
-    res.json({
-      added: plan.added,
-      updated: plan.updated,
-      removed: plan.removed,
-      generatedCreatives: madeCreatives,
-      requeuedJobs,
-    } satisfies ImportCatalogueResponse);
+    const fileName = req.file.originalname;
+    const who = requester(req);
+    const importId = startImport({
+      next: plan.next,
+      changed: new Set([...plan.added, ...plan.updated]),
+      needsNameCheck: (b) => current.get(b.brand_id) !== b.display_name,
+      catalogueDir: catalogueDir(),
+      finish: (generatedCreatives) => {
+        try {
+          applyImport(plan, mode, who, fileName);
+        } catch (err) {
+          throw new PermanentError(`Not a valid catalogue: ${formatZod(err)}`);
+        }
+        const requeuedJobs = rerunAllJobs(`catalogue imported (${mode})`, who);
+        return { added: plan.added, updated: plan.updated, removed: plan.removed, generatedCreatives, requeuedJobs } satisfies ImportCatalogueResponse;
+      },
+    });
+    res.status(202).json({ importId } satisfies ImportStartedResponse);
   } catch (err) {
     if (err instanceof PermanentError) res.status(422).json({ error: err.message });
     else next(err);
   }
+});
+
+brandsRouter.get("/api/brands/import/:id", (req, res) => {
+  const progress = getImportProgress(req.params.id);
+  if (!progress) return res.status(404).json({ error: "unknown import (the server may have restarted)" });
+  res.json(progress);
 });
 
 /** First few validation problems of a zod error as one readable line; other errors as-is. */

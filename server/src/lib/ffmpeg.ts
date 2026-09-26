@@ -15,8 +15,10 @@ export function run(cmd: string, args: string[]): Promise<RunResult> {
     p.stdout.on("data", (d) => (stdout += d));
     p.stderr.on("data", (d) => (stderr += d));
     p.on("error", reject);
-    p.on("close", (code) => {
+    p.on("close", (code, signal) => {
       if (code === 0) resolve({ stdout, stderr });
+      // No exit code means the process was killed from outside, almost always by the kernel running out of memory.
+      else if (code === null) reject(new Error(`${cmd} was killed by ${signal ?? "a signal"} (usually out of memory): ${stderr.slice(-2000)}`));
       else reject(new Error(`${cmd} exited ${code}: ${stderr.slice(-2000)}`));
     });
   });

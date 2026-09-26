@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { Clapperboard, FileJson, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
-import type { BrandSummary } from "shared";
+import { Check, Clapperboard, FileJson, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
+import type { BrandSummary, ImportProgress } from "shared";
 import { createBrand, deleteBrand, importCatalogue, listBrands, rerunAllJobs } from "@/lib/api";
 
 const DURATIONS = [15, 20, 30];
@@ -14,6 +14,7 @@ export default function BrandsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ImportProgress | null>(null);
 
   const load = () =>
     listBrands()
@@ -39,6 +40,7 @@ export default function BrandsPage() {
       setError((err as Error).message);
     } finally {
       setBusy(null);
+      setProgress(null);
     }
   }
 
@@ -48,7 +50,7 @@ export default function BrandsPage() {
     const data = new FormData(form);
     if (data.get("mode") === "replace" && !confirm("Replace the whole catalogue with this file? Brands not in it are removed.")) return;
     act("import", async () => {
-      const r = await importCatalogue(data);
+      const r = await importCatalogue(data, setProgress);
       form.reset();
       const parts = [
         r.added.length && `${r.added.length} added`,
@@ -167,8 +169,9 @@ export default function BrandsPage() {
                 {busy === "import" && <LoaderCircle className="h-4 w-4 animate-spin" />}
                 {busy === "import" ? "Importing…" : "Import"}
               </button>
-              {busy === "import" && <span className="text-xs text-muted">Creating missing ads takes a few seconds each.</span>}
+              {busy === "import" && !progress && <span className="text-xs text-muted">Starting the import…</span>}
             </div>
+            {busy === "import" && progress && <ImportProgressPanel progress={progress} />}
           </form>
         ) : (
           <form role="tabpanel" onSubmit={onCreate} className="space-y-5 p-6">
@@ -288,6 +291,43 @@ export default function BrandsPage() {
           ))}
         </ul>
       </section>
+    </div>
+  );
+}
+
+/** Live progress of a catalogue import: a bar, and each brand as it becomes ready. */
+function ImportProgressPanel({ progress: p }: { progress: ImportProgress }) {
+  const pct = p.total ? Math.round((p.ready.length / p.total) * 100) : 100;
+  const headline =
+    p.phase === "checking"
+      ? "Checking brand names…"
+      : p.phase === "saving"
+        ? "Saving the catalogue…"
+        : `${p.ready.length} of ${p.total} brand${p.total === 1 ? "" : "s"} ready`;
+  return (
+    <div aria-live="polite" className="space-y-3 rounded-2xl border border-border bg-surface-elevated/50 p-4 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-medium">{headline}</span>
+        <span className="text-xs text-muted">{p.phase === "checking" ? "" : `${pct}%`}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-border" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+        <div className="h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${p.phase === "checking" ? 0 : pct}%` }} />
+      </div>
+      <ul className="space-y-1 text-xs">
+        {p.ready.map((name) => (
+          <li key={name} className="flex items-center gap-2 text-emerald-300">
+            <Check className="h-3.5 w-3.5" />
+            {name} ready
+          </li>
+        ))}
+        {p.working && (
+          <li className="flex items-center gap-2 text-muted">
+            <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+            {p.working}: creating ads…
+          </li>
+        )}
+      </ul>
+      <p className="text-xs text-muted">Nothing is saved until every brand is ready.</p>
     </div>
   );
 }

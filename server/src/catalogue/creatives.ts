@@ -157,7 +157,11 @@ export async function renderTitleCard(b: CardBrand, out: string) {
   return out;
 }
 
-/** A still image as a video with a slow zoom (Ken Burns), with a quiet tone bed. */
+/**
+ * A still image as a video with a slow zoom (Ken Burns), with a quiet tone bed. Kept light on
+ * purpose: a 30s clip with the default x264 preset peaked at ~310 MB and 26 CPU-seconds, enough to
+ * get ffmpeg killed by the kernel in a small container; this uses ~120 MB and a third of the CPU.
+ */
 export async function imageClip(image: string, out: string, durationSec: number) {
   const frames = Math.round(durationSec * FPS);
   const zoom = `zoompan=z='min(1+0.06*on/${frames},1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${W}x${H}:fps=${FPS}`;
@@ -165,8 +169,9 @@ export async function imageClip(image: string, out: string, durationSec: number)
     "-y", "-v", "error",
     "-i", image,
     "-f", "lavfi", "-t", String(durationSec), "-i", "sine=frequency=262:sample_rate=44100",
+    "-filter_complex_threads", "1",
     "-filter_complex", `[0:v]scale=${W * 2}:${H * 2},${zoom}[v];[1:a]volume=0.03[a]`,
-    "-map", "[v]", "-map", "[a]", "-t", String(durationSec), ...encode, out,
+    "-map", "[v]", "-map", "[a]", "-t", String(durationSec), "-preset", "veryfast", "-threads", "2", ...encode, out,
   ]);
 }
 
@@ -198,11 +203,12 @@ const cardBrand = (b: RawBrandData): CardBrand => ({
 
 /**
  * Makes title-card clips for creatives whose files are missing (or all of them with `force`),
- * at the paths the catalogue expects. Returns how many clips were made.
+ * at the paths the catalogue expects. Returns how many clips were made. One brand at a time by
+ * default, so a small server never runs several ffmpeg processes at once.
  */
-export async function ensureCreativeFiles(brands: RawBrandData[], catalogueDir: string, opts: { force?: boolean } = {}) {
+export async function ensureCreativeFiles(brands: RawBrandData[], catalogueDir: string, opts: { force?: boolean; concurrency?: number } = {}) {
   let made = 0;
-  await mapLimit(brands, 2, async (b) => {
+  await mapLimit(brands, opts.concurrency ?? 1, async (b) => {
     const todo = b.creatives
       .map((c) => ({ c, file: path.resolve(catalogueDir, c.url) }))
       .filter(({ file }) => opts.force || !fsSync.existsSync(file));

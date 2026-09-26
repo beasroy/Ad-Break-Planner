@@ -5,6 +5,8 @@ import type {
   CreateJobResponse,
   GetJobResponse,
   ImportCatalogueResponse,
+  ImportProgress,
+  ImportStartedResponse,
   Job,
   JobStreamEvent,
   ListBrandsResponse,
@@ -75,9 +77,29 @@ async function sendJson<T>(path: string, init: RequestInit): Promise<T> {
 /** Creates a brand (multipart: fields + optional ad videos). Takes up to a minute when generating creatives. */
 export const createBrand = (form: FormData) => sendJson<BrandChangeResponse>("/api/brands", { method: "POST", body: form });
 
-/** Imports a brands.json-format file (multipart: catalogue, mode, missingAds). */
-export const importCatalogue = (form: FormData) =>
-  sendJson<ImportCatalogueResponse>("/api/brands/import", { method: "POST", body: form });
+/**
+ * Imports a brands.json-format file (multipart: catalogue, mode). The server imports in the
+ * background; this polls it and reports progress until it is done. Rejects with the server's message.
+ */
+export async function importCatalogue(form: FormData, onProgress: (p: ImportProgress) => void): Promise<ImportCatalogueResponse> {
+  const { importId } = await sendJson<ImportStartedResponse>("/api/brands/import", { method: "POST", body: form });
+  let failedPolls = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 700));
+    let p: ImportProgress;
+    try {
+      p = await getJson<ImportProgress>(`/api/brands/import/${encodeURIComponent(importId)}`);
+      failedPolls = 0;
+    } catch (err) {
+      // One dropped request must not abandon an import that is still running on the server.
+      if (++failedPolls >= 5) throw new Error(`Lost contact with the server while importing: ${(err as Error).message}`);
+      continue;
+    }
+    onProgress(p);
+    if (p.status === "error") throw new Error(p.error ?? "Import failed");
+    if (p.status === "done" && p.result) return p.result;
+  }
+}
 
 export const deleteBrand = (id: string) =>
   sendJson<BrandChangeResponse>(`/api/brands/${encodeURIComponent(id)}`, { method: "DELETE" });
