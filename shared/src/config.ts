@@ -24,11 +24,10 @@ export interface Thresholds {
   chunkSeamGuardMs: number;
   /** Fraction of a segment inside silence windows above which it is treated as hallucinated. */
   hallucinationSilenceOverlap: number;
-  /** no_speech_prob at or above this flags a segment regardless of avg_logprob. */
-  hallucinationNoSpeechProbAlone: number;
-  hallucinationNoSpeechProb: number;
-  hallucinationAvgLogprob: number;
-  hallucinationCompressionRatio: number;
+  /** Brands the ranker scores below this fit are not placed. */
+  minBrandFit: number;
+  /** Negative contexts listed by more than this share of brands block every brand. */
+  consensusNegativeShare: number;
 }
 
 export interface ScoreWeights {

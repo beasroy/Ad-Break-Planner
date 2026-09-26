@@ -60,7 +60,7 @@ export async function runPipeline(job: Job, opts: { force?: boolean } = {}): Pro
     const ctx: StageContext = makeContext({ jobId: job.id, dir, videoPath, catalogue, force: opts.force });
 
     const ingest = await stage("ingest", () => runIngest(ctx));
-    // Whisper and ffmpeg signals run side by side; the transcript filter needs both.
+    // Transcription and ffmpeg signals run side by side; the transcript filter needs both.
     const [raw, signals] = await Promise.all([
       stage("transcribe", () => transcribeChunks(ctx, ingest)),
       stage("signals", () => runSignals(ctx, ingest)),

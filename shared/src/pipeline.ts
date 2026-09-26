@@ -27,11 +27,12 @@ export interface Segment {
   end: number;
   text: string;
   chunkIndex: number;
-  noSpeechProb?: number;
-  avgLogprob?: number;
-  compressionRatio?: number;
+  /** Which transcriber produced it. */
+  source: "deepgram" | "llm";
+  /** Transcriber confidence (Deepgram utterance confidence), when available. */
+  confidence?: number;
   /** Timing came from an LLM and can drift by seconds; it is not used as a hard wall for cuts
-   *  (measured silence is the proof instead). Whisper timing is audio-aligned and is. */
+   *  (measured silence is the proof instead). Deepgram timing is audio-aligned and is. */
   approxTiming?: boolean;
   /** Set when the hallucination filter removed it from the transcript. Still counts as occupied time for cuts. */
   dropped?: { reason: string };
@@ -41,8 +42,13 @@ export interface Transcript {
   segments: Segment[];
   /** Absolute times (sec) where one chunk ends and the next begins. */
   chunkSeams: number[];
-  /** Per-segment field names Whisper actually returned (logged for the hallucination filter). */
+  /** Per-utterance field names the transcriber actually returned. */
   rawFieldsSeen: string[];
+  /** Chunks each provider covered, e.g. { deepgram: 12, llm: 12 } when both succeeded everywhere. */
+  providers: Record<string, number>;
+  /** Audio-aligned speech intervals (Deepgram words, each capped). Hard walls for cuts, separate from the
+   *  text segments, which may come from the LLM for better scene understanding. */
+  speech: Interval[];
 }
 
 export interface Interval {
@@ -90,6 +96,8 @@ export interface WhereScore {
 
 export interface BlockReason {
   context: string;
+  /** "brand": on this brand's own list; "consensus": listed by most brands, so it blocks all. */
+  rule: "brand" | "consensus";
   scene: "before" | "after";
   confidence: number;
   source: NegativeTag["source"];

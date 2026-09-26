@@ -55,7 +55,7 @@ export function validateWindowScenes(proposed: LlmScene[], window: Segment[], vo
   return valid;
 }
 
-async function proposeScenes(ctx: StageContext, window: Segment[], wi: number): Promise<LlmScene[]> {
+async function proposeScenes(ctx: StageContext, window: Segment[], wi: number): Promise<LlmScene[] | undefined> {
   const vocab = ctx.catalogue.negativeVocab;
   let lastErr = "";
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -77,7 +77,7 @@ async function proposeScenes(ctx: StageContext, window: Segment[], wi: number): 
     }
   }
   // Fail safe: this window contributes no boundaries and its segments stay unclassified.
-  return [];
+  return undefined;
 }
 
 interface Proposal extends LlmScene {
@@ -171,10 +171,17 @@ export async function runScenes(ctx: StageContext, transcript: Transcript): Prom
   const kept = transcript.segments.filter((s) => !s.dropped);
   const windows = makeWindows(kept, ctx.config.scenes.windowSec, ctx.config.scenes.overlapSec);
   const perWindow = await mapLimit(windows, ctx.config.openrouter.concurrency, (w, i) => proposeScenes(ctx, w, i));
-  const proposals = perWindow.flatMap((ps, window) => ps.map((p) => ({ ...p, window })));
+  const proposals = perWindow.flatMap((ps, window) => (ps ?? []).map((p) => ({ ...p, window })));
   const scenes = mergeScenes(kept, proposals);
 
-  await writeKeyed(out, key, scenes);
+  const failed = perWindow.filter((p) => p === undefined).length;
+  if (failed) {
+    // Don't cache a partial result: the failed windows stay unclassified (no ads) for this run
+    // only, and the next run retries them.
+    ctx.log(`scenes: ${failed} window(s) failed; result not cached`);
+  } else {
+    await writeKeyed(out, key, scenes);
+  }
   const unclassified = scenes.filter((s) => s.confidence < ctx.config.thresholds.sceneMinConfidence).length;
   ctx.log(`scenes: ${windows.length} windows → ${scenes.length} scenes (${unclassified} low-confidence)`);
   return scenes;

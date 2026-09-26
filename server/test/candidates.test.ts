@@ -70,9 +70,9 @@ describe("±boundarySearchSec search around the estimated scene change", () => {
     expect(r.safe).toBeUndefined();
   });
 
-  it("still never cuts through audio-aligned (Whisper) speech, even inside silence", () => {
-    const whisper = seg(1, 22, 24);
-    const r = findSafeInterval(estimate, [whisper], [{ start: 22.5, end: 23.8 }], [], 700, T);
+  it("still never cuts through audio-aligned (Deepgram) speech, even inside silence", () => {
+    const spoken = seg(1, 22, 24);
+    const r = findSafeInterval(estimate, [spoken], [{ start: 22.5, end: 23.8 }], [], 700, T);
     expect(r.safe).toBeUndefined();
   });
 
@@ -99,6 +99,7 @@ describe("computeCandidates", () => {
     const [c] = computeCandidates({
       scenes,
       segments,
+      speech: [],
       chunkSeams: [],
       signals: { silences: [{ start: 20.1, end: 22.9 }], shotCuts: [15, 21.7, 25] },
       minSilenceMs: 700,
@@ -115,6 +116,7 @@ describe("computeCandidates", () => {
     const [c] = computeCandidates({
       scenes,
       segments,
+      speech: [],
       chunkSeams: [],
       signals: { silences: [{ start: 20.5, end: 22.5 }], shotCuts: [] },
       minSilenceMs: 700,
@@ -125,11 +127,28 @@ describe("computeCandidates", () => {
     expect(c.snappedTo).toBe("silenceMidpoint");
   });
 
+  it("Deepgram speech intervals block cuts even when the text segments are LLM-timed", () => {
+    const llmText = [seg(0, 0, 20, { approxTiming: true, source: "llm" }), seg(1, 23, 40, { approxTiming: true, source: "llm" })];
+    const base = {
+      scenes,
+      segments: llmText,
+      chunkSeams: [],
+      signals: { silences: [{ start: 20.5, end: 22.5 }], shotCuts: [] },
+      minSilenceMs: 700,
+      thresholds: T,
+      scoring: SCORING,
+    };
+    expect(computeCandidates({ ...base, speech: [] })[0].cutTime).toBeDefined();
+    // Someone is actually talking through the quiet window per Deepgram: no cut.
+    expect(computeCandidates({ ...base, speech: [{ start: 20, end: 23 }] })[0].rejected?.stage).toBe("candidates");
+  });
+
   it("rejects boundaries where speech overlaps", () => {
     const overlapping = [scenes[0], { ...scenes[1], start: 19 }];
     const [c] = computeCandidates({
       scenes: overlapping,
       segments,
+      speech: [],
       chunkSeams: [],
       signals: { silences: [], shotCuts: [] },
       minSilenceMs: 700,

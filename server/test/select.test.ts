@@ -48,6 +48,30 @@ describe("selectBreaks", () => {
     expect(breaks).toHaveLength(2);
   });
 
+  it("prefers more breaks over one higher-scoring break (feluda case)", () => {
+    // Best single cut at 12.6m blocks both 6.6m and 18.8m; those two are 12 min apart.
+    const { breaks } = run(
+      [cand("m6.6", 396, 0.47, [["a", 0.92], ["b", 0.5]]), cand("m12.6", 756, 0.65, [["c", 0.8]]), cand("m18.8", 1128, 0.41, [["a", 1], ["b", 0.6]])],
+      25.6 * 60,
+    );
+    expect(breaks.map((b) => b.candidateId)).toEqual(["m6.6", "m18.8"]);
+    expect(breaks[0].brandId).not.toBe(breaks[1].brandId);
+  });
+
+  it("gives an earlier break its second-best brand when that lets a later break exist", () => {
+    // Both prefer "a"; the later one can ONLY take "a". The earlier one must take "b".
+    const { breaks } = run([cand("early", 600, 0.9, [["a", 1], ["b", 0.6]]), cand("late", 1200, 0.8, [["a", 0.9]])]);
+    expect(breaks.map((b) => [b.candidateId, b.brandId])).toEqual([
+      ["early", "b"],
+      ["late", "a"],
+    ]);
+  });
+
+  it("upgrades to longer creatives when the ad-load budget allows", () => {
+    const { breaks } = run([cand("x1", 600, 0.9, [["a", 1]]), cand("x2", 1200, 0.8, [["b", 1]])]);
+    expect(breaks.map((b) => b.adDurationSec)).toEqual([30, 30]);
+  });
+
   it("never exceeds the ad-load cap", () => {
     const tight = { ...PACING, maxAdLoadPct: 40 / 2700 };
     const { breaks } = run([cand("x1", 600, 0.9, [["a", 1]]), cand("x2", 1200, 0.8, [["b", 1]]), cand("x3", 1800, 0.7, [["c", 1]])], 2700, tight);
@@ -61,7 +85,7 @@ describe("selectBreaks", () => {
       cand("x2", 1200, 0.8, [["a", 0.9], ["b", 0.6]]),
     ]);
     expect(breaks.map((b) => b.brandId)).toEqual(["a", "b"]);
-    expect(breaks[1].reason).toMatch(/swapped/);
+    expect(breaks[1].reason).toMatch(/back-to-back/);
   });
 
   it("drops a repeated brand break when there is no alternative", () => {

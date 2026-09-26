@@ -20,27 +20,36 @@ export const config = {
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     baseUrl: "https://openrouter.ai/api/v1",
-    /** "llm": audio-capable chat model with structured output (default; far better Bengali).
-     *  "whisper": /audio/transcriptions endpoint, kept as a fallback. */
-    transcribeProvider: (process.env.TRANSCRIBE_PROVIDER ?? "llm") as "llm" | "whisper",
+    /** Fallback transcriber (per chunk, when Deepgram fails): audio-capable LLM with structured output.
+     *  Good Bengali text, but timestamps can drift by seconds. */
     transcribeModel: process.env.MODEL_TRANSCRIBE ?? "google/gemini-3.8-flash",
-    whisperModel: process.env.MODEL_WHISPER ?? "openai/whisper-1",
     reasonModel: process.env.MODEL_REASON ?? "openai/gpt-5.6-luna",
     requestTimeoutMs: 90_000,
     concurrency: 4,
     retries: 1,
+    /** Stay under OpenRouter's per-model rate limit (new accounts: 20 requests/min per model). */
+    rpmPerModel: 18,
+    /** Extra retries, with backoff, for 429 rate-limit responses only. */
+    rateLimitRetries: 4,
   },
 
-  /** Language of the content; used to prefer matching ad creatives. Not sent to Whisper:
-   *  OpenAI's whisper-1 rejects `language=bn` (400), and auto-detect returns Bengali. */
+  /** Primary transcriber: audio-aligned word/utterance timestamps. nova-3 is the only Deepgram model with Bengali. */
+  deepgram: {
+    apiKey: process.env.DEEPGRAM_API_KEY ?? "",
+    baseUrl: "https://api.deepgram.com/v1",
+    model: process.env.DEEPGRAM_MODEL ?? "nova-3",
+    language: "bn",
+    /** Pause (sec) that splits utterances. */
+    uttSplitSec: 0.5,
+    /** Deepgram stretches a word's end across a following pause (seen up to 20s). Speech walls use
+     *  each word capped to this length from its start; real Bengali words are well under 1s. */
+    maxWordSec: 1.0,
+    requestTimeoutMs: 60_000,
+    retries: 1,
+  },
+
+  /** Language of the content; used to prefer matching ad creatives. */
   contentLanguage: "bn",
-
-  transcription: {
-    /** Words separated by at least this pause start a new utterance segment. */
-    utterancePauseSec: 0.5,
-    /** Utterances are split once they reach this length. */
-    maxUtteranceSec: 15,
-  },
 
   audio: {
     sampleRate: 16_000,
@@ -75,7 +84,7 @@ export const config = {
     negativeTagMinConfidence: 0.3,
     cutPaddingMs: 150,
     /** Every cut must sit inside a measured ffmpeg silence window. Transcript timing alone is
-     *  never trusted to prove nobody is speaking (LLM/Whisper timestamps drift, speech gets missed). */
+     *  never trusted to prove nobody is speaking (LLM timestamps drift; any transcriber can miss speech). */
     requireSilenceConfirmation: true,
     /** LLM transcript timestamps drift by a few seconds, so look this far either side of the
      *  estimated scene change for the real pause. The cut still has to be in measured silence. */
@@ -83,10 +92,11 @@ export const config = {
     minGapWithoutSilenceMs: 2000,
     chunkSeamGuardMs: 1000,
     hallucinationSilenceOverlap: 0.6,
-    hallucinationNoSpeechProbAlone: 0.9,
-    hallucinationNoSpeechProb: 0.6,
-    hallucinationAvgLogprob: -1.0,
-    hallucinationCompressionRatio: 2.4,
+    /** Ranker fit below this = the brand is unrelated to the scene = don't place it. */
+    minBrandFit: 0.3,
+    /** A negative context listed by more than this share of catalogue brands blocks every brand
+     *  (computed from the catalogue at runtime, so it adapts when brands are added). */
+    consensusNegativeShare: 0.5,
   } satisfies Thresholds,
 
   scoring: {

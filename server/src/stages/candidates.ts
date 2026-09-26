@@ -1,6 +1,6 @@
 // Stage 5 ("Where"): a candidate per scene boundary. HARD RULE enforced here:
 // the cut time must sit inside a measured ffmpeg silence window (padded), and
-// outside every audio-aligned (Whisper) segment, flagged ones included. LLM
+// outside every audio-aligned (Deepgram) segment, flagged ones included. LLM
 // transcript timing drifts by seconds, so we search ±boundarySearchSec around the
 // estimated scene change and let measured silence, not LLM timestamps, prove quiet.
 import type { Candidate, Interval, Scene, ScoreWeights, Segment, Signals, Thresholds, Transcript } from "shared";
@@ -36,6 +36,8 @@ const longest = (xs: Interval[]) => xs.reduce<Interval | undefined>((m, x) => (!
 export interface CandidateInputs {
   scenes: Scene[];
   segments: Segment[];
+  /** Audio-aligned speech intervals (Deepgram): always hard walls. */
+  speech: Interval[];
   chunkSeams: number[];
   signals: Signals;
   minSilenceMs: number;
@@ -100,7 +102,12 @@ export function findSafeInterval(
 
 /** Pure: build and score every scene-boundary candidate. */
 export function computeCandidates(inp: CandidateInputs): Candidate[] {
-  const { scenes, segments, signals, scoring } = inp;
+  const { scenes, signals, scoring } = inp;
+  // Deepgram speech intervals join the text segments as hard walls (source "deepgram" = audio-aligned).
+  const segments: Segment[] = [
+    ...inp.segments,
+    ...inp.speech.map((s, i): Segment => ({ id: -1 - i, start: s.start, end: s.end, text: "", chunkIndex: -1, source: "deepgram" })),
+  ];
   const out: Candidate[] = [];
 
   for (let k = 0; k < scenes.length - 1; k++) {
@@ -148,13 +155,20 @@ export async function runCandidates(ctx: StageContext, scenes: Scene[], transcri
     thresholds: ctx.config.thresholds,
     scoring: ctx.config.scoring,
   };
-  const key = hashJson({ inputs, scenes: hashJson(scenes), segments: hashJson(transcript.segments), signals: hashJson(signals) });
+  const key = hashJson({
+    inputs,
+    scenes: hashJson(scenes),
+    segments: hashJson(transcript.segments),
+    speech: hashJson(transcript.speech ?? []),
+    signals: hashJson(signals),
+  });
   const cached = ctx.force ? undefined : await readKeyed<Candidate[]>(out, key);
   if (cached) return cached;
 
   const candidates = computeCandidates({
     scenes,
     segments: transcript.segments,
+    speech: transcript.speech ?? [],
     chunkSeams: transcript.chunkSeams,
     signals,
     ...inputs,

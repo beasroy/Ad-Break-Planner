@@ -79,3 +79,12 @@ describe("9th brand, no code change", () => {
     expect(breaks.find((b) => b.candidateId === "blocked")?.brandId).not.toBe("brand_ninth");
   });
 });
+
+describe("minimum brand fit", () => {
+  it("rejects a candidate whose only eligible brands are unrelated to the scene", async () => {
+    const cat = await catalogueWithNinth();
+    const scenes: Scene[] = [scene(0, { activity: "staring at a wall" }), scene(1)];
+    const matched = await matchCandidates([candidate("meh", 600, 0, 1)], scenes, cat.brands, config.thresholds, () => overlapRank, 1);
+    expect(matched[0].rejected?.reason).toMatch(/no eligible brand fits the scene/);
+  });
+});

@@ -6,7 +6,7 @@ import { chatJson } from "../../lib/openrouter";
 import { mapLimit } from "../../lib/pool";
 import { RANK_PROMPT_VERSION, RankResponse, rankJsonSchema, rankSystemPrompt, rankUserPrompt } from "../../prompts/rank";
 import { artifactPath, type StageContext } from "../context";
-import { decideEligibility } from "./eligibility";
+import { decideEligibility, type EligibilityThresholds } from "./eligibility";
 
 export type RankFn = (before: Scene, after: Scene, eligible: Brand[]) => Promise<MatchedCandidate["ranked"]>;
 
@@ -35,7 +35,7 @@ export async function matchCandidates(
   candidates: Candidate[],
   scenes: Scene[],
   brands: Brand[],
-  thresholds: Parameters<typeof decideEligibility>[3],
+  thresholds: EligibilityThresholds & { minBrandFit: number },
   rank: (c: Candidate) => RankFn,
   concurrency: number,
 ): Promise<(Candidate | MatchedCandidate)[]> {
@@ -56,12 +56,19 @@ export async function matchCandidates(
       return m;
     }
     try {
-      const ranked = await rank(c)(before, after, eligible);
-      m.ranked = ranked.sort((x, y) => y.fit - x.fit);
-      for (const r of m.ranked) {
+      const ranked = (await rank(c)(before, after, eligible)).sort((x, y) => y.fit - x.fit);
+      for (const r of ranked) {
         const d = decisions.find((x) => x.brandId === r.brandId)!;
         d.fit = r.fit;
         d.reason = r.reason;
+      }
+      // "When unsure, don't place" applied to relevance: an unrelated brand is not placed.
+      m.ranked = ranked.filter((r) => r.fit >= thresholds.minBrandFit);
+      if (!m.ranked.length) {
+        m.rejected = {
+          stage: "match",
+          reason: `no eligible brand fits the scene (best fit ${ranked[0]?.fit.toFixed(2) ?? "n/a"} < ${thresholds.minBrandFit})`,
+        };
       }
     } catch (err) {
       m.rejected = { stage: "match", reason: `brand ranking failed: ${(err as Error).message.slice(0, 200)}` };
