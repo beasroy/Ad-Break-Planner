@@ -38,15 +38,16 @@ async function post(endpoint: string, body: BodyInit, headers: Record<string, st
   return JSON.parse(text);
 }
 
-/** Whisper transcription of one audio file. Returns the raw verbose_json response. */
-export async function transcribe(filePath: string): Promise<any> {
+/** Whisper (fallback provider) transcription of one audio file. Returns the raw verbose_json response. */
+export async function transcribeWhisper(filePath: string): Promise<any> {
   const bytes = await fs.readFile(filePath);
   return withRetry(`transcribe ${path.basename(filePath)}`, () => {
     const form = new FormData();
     form.append("file", new Blob([bytes], { type: "audio/mpeg" }), path.basename(filePath));
-    form.append("model", or.transcribeModel);
-    form.append("language", or.transcribeLanguage);
+    form.append("model", or.whisperModel);
     form.append("response_format", "verbose_json");
+    // Segment timestamps are ~30s blocks for Bengali; word timestamps are what give us real speech gaps.
+    form.append("timestamp_granularities[]", "word");
     form.append("timestamp_granularities[]", "segment");
     form.append("temperature", "0");
     return post("/audio/transcriptions", form);
@@ -55,7 +56,11 @@ export async function transcribe(filePath: string): Promise<any> {
 
 export type ChatContent =
   | string
-  | ({ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } })[];
+  | (
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string } }
+      | { type: "input_audio"; input_audio: { data: string; format: string } }
+    )[];
 
 /** Chat completion with JSON-schema structured output. Returns the parsed JSON object (unvalidated). */
 export async function chatJson(opts: {
@@ -64,12 +69,14 @@ export async function chatJson(opts: {
   user: ChatContent;
   schemaName: string;
   schema: object;
+  /** Defaults to the reasoning model. */
+  model?: string;
 }): Promise<unknown> {
   return withRetry(opts.label, async () => {
     const res = await post(
       "/chat/completions",
       JSON.stringify({
-        model: or.reasonModel,
+        model: opts.model ?? or.reasonModel,
         messages: [
           { role: "system", content: opts.system },
           { role: "user", content: opts.user },

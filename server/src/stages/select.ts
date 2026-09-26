@@ -27,7 +27,8 @@ export function selectBreaks(inp: SelectInputs): { breaks: Break[]; log: Selecti
   const brandById = new Map(inp.brands.map((b) => [b.id, b]));
   const combined = (c: MatchedCandidate, fit: number) => c.where!.total * w.where + fit * w.brandFit;
   const maxAdSec = p.maxAdLoadPct * dur;
-  const cap = Math.floor((p.maxBreaksPerHour * dur) / 3600);
+  // Rounded to nearest: a 25 min episode (4/h × 0.43h = 1.7) gets 2 breaks, not 1.
+  const cap = Math.round((p.maxBreaksPerHour * dur) / 3600);
 
   const pool = inp.candidates.filter(isMatched).sort((a, b) => combined(b, b.ranked[0].fit) - combined(a, a.ranked[0].fit));
   const log = new Map<string, SelectionLog>();
@@ -35,7 +36,7 @@ export function selectBreaks(inp: SelectInputs): { breaks: Break[]; log: Selecti
 
   type Sel = { c: MatchedCandidate; brandId: string; creative: Creative; fit: number; reason: string };
   const selected: Sel[] = [];
-  const adTime = (except?: Sel) => selected.reduce((t, s) => (s === except ? t : t + s.creative.durationSec), 0);
+  const adTime = () => selected.reduce((t, s) => t + s.creative.durationSec, 0);
 
   let capped = false;
   for (const c of pool) {
@@ -47,38 +48,30 @@ export function selectBreaks(inp: SelectInputs): { breaks: Break[]; log: Selecti
     if (near) { reject(c.id, `within ${p.minGapSec}s of selected break ${near.c.id}`); continue; }
     if (selected.length + 1 > cap) { capped = true; reject(c.id, `break cap reached (${cap} for this duration)`); continue; }
 
-    const top = c.ranked[0];
-    const creative = pickCreative(brandById.get(top.brandId)!, maxAdSec - adTime(), inp.language);
-    if (!creative) { reject(c.id, `ad load would exceed ${Math.round(p.maxAdLoadPct * 100)}%`); continue; }
-    selected.push({ c, brandId: top.brandId, creative, fit: top.fit, reason: top.reason });
-  }
+    // No back-to-back same brand: take the best-ranked brand that differs from the
+    // breaks immediately before and after this one in time, and whose creative fits.
+    const before = selected.filter((s) => s.c.cutTime! < t).sort((a, b) => b.c.cutTime! - a.c.cutTime!)[0];
+    const after = selected.filter((s) => s.c.cutTime! > t).sort((a, b) => a.c.cutTime! - b.c.cutTime!)[0];
+    const neighbours = new Set([before?.brandId, after?.brandId]);
+    const budget = maxAdSec - adTime();
 
-  // No back-to-back same brand: swap the weaker break of a repeated pair to its next-best
-  // eligible brand that differs from both neighbours; drop it if no alternative fits.
-  selected.sort((a, b) => a.c.cutTime! - b.c.cutTime!);
-  for (let i = 1; i < selected.length; i++) {
-    const prev = selected[i - 1];
-    const cur = selected[i];
-    if (prev.brandId !== cur.brandId) continue;
-    const weakIdx = combined(prev.c, prev.fit) < combined(cur.c, cur.fit) ? i - 1 : i;
-    const weak = selected[weakIdx];
-    const neighbours = new Set([selected[weakIdx - 1]?.brandId, selected[weakIdx + 1]?.brandId]);
-    const budget = maxAdSec - adTime(weak);
-    let swapped = false;
-    for (const alt of weak.c.ranked) {
-      if (alt.brandId === weak.brandId || neighbours.has(alt.brandId)) continue;
-      const creative = pickCreative(brandById.get(alt.brandId)!, budget, inp.language);
+    let pick: Sel | undefined;
+    let blockedByRepeat = false;
+    for (const r of c.ranked) {
+      if (neighbours.has(r.brandId)) { blockedByRepeat = true; continue; }
+      const creative = pickCreative(brandById.get(r.brandId)!, budget, inp.language);
       if (!creative) continue;
-      Object.assign(weak, { brandId: alt.brandId, creative, fit: alt.fit, reason: `${alt.reason} (swapped: avoid back-to-back ${prev.brandId})` });
-      swapped = true;
+      const swapped = r !== c.ranked[0] && neighbours.has(c.ranked[0].brandId);
+      pick = { c, brandId: r.brandId, creative, fit: r.fit, reason: swapped ? `${r.reason} (swapped: avoid back-to-back ${c.ranked[0].brandId})` : r.reason };
       break;
     }
-    if (!swapped) {
-      reject(weak.c.id, `same brand as adjacent break and no alternative eligible brand`);
-      selected.splice(weakIdx, 1);
+    if (!pick) {
+      reject(c.id, blockedByRepeat ? "same brand as adjacent break and no alternative eligible brand" : `ad load would exceed ${Math.round(p.maxAdLoadPct * 100)}%`);
+      continue;
     }
-    i = 0; // re-scan after any change
+    selected.push(pick);
   }
+  selected.sort((a, b) => a.c.cutTime! - b.c.cutTime!);
 
   const breaks: Break[] = selected.map((s) => ({
     candidateId: s.c.id,
@@ -103,7 +96,7 @@ export async function runSelect(ctx: StageContext, matched: (Candidate | Matched
   const inputs = {
     pacing: ctx.config.pacing,
     weights: ctx.config.scoring.combined,
-    language: ctx.config.openrouter.transcribeLanguage,
+    language: ctx.config.contentLanguage,
     durationSec,
   };
   const key = hashJson({ inputs, catalogue: ctx.catalogue.hash, matched: hashJson(matched) });

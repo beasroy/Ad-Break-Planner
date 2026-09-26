@@ -1,4 +1,4 @@
-// Generates a placeholder clip (colour card + brand name + duration) for every
+// Generates a placeholder clip (colour card + tone per brand) for every
 // catalogue creative whose file is missing. Stand-ins until real creatives are dropped in.
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -19,15 +19,12 @@ for (const [i, brand] of catalogue.brands.entries()) {
     }
     await fs.mkdir(path.dirname(out), { recursive: true });
     const d = creative.durationSec;
-    const esc = (s: string) => s.replace(/[:'\\]/g, "");
+    // Plain colour card + tone per brand (Homebrew ffmpeg ships without drawtext);
+    // the brand name reaches the player through the VAST AdTitle.
     await run("ffmpeg", [
       "-y", "-v", "error",
       "-f", "lavfi", "-i", `color=c=${colours[i % colours.length]}:s=1280x720:d=${d}:r=25`,
       "-f", "lavfi", "-i", `sine=frequency=${330 + i * 40}:duration=${d}`,
-      "-vf",
-      `drawtext=text='${esc(brand.name)}':fontcolor=white:fontsize=84:x=(w-text_w)/2:y=(h-text_h)/2-60,` +
-        `drawtext=text='PLACEHOLDER AD  ${esc(creative.id)}':fontcolor=white:fontsize=32:x=(w-text_w)/2:y=(h/2)+40,` +
-        `drawtext=text='%{eif\\:${d}-t\\:d}s':fontcolor=white:fontsize=40:x=w-text_w-40:y=40`,
       "-af", "volume=0.05",
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-movflags", "+faststart",
       out,

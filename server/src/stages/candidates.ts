@@ -1,7 +1,8 @@
 // Stage 5 ("Where"): a candidate per scene boundary. HARD RULE enforced here:
-// the cut time must sit in a speech-free interval, padded away from every
-// segment edge (including segments flagged as hallucinations), and confirmed
-// by an ffmpeg silence window unless the gap is long and away from chunk seams.
+// the cut time must sit inside a measured ffmpeg silence window (padded), and
+// outside every audio-aligned (Whisper) segment, flagged ones included. LLM
+// transcript timing drifts by seconds, so we search ±boundarySearchSec around the
+// estimated scene change and let measured silence, not LLM timestamps, prove quiet.
 import type { Candidate, Interval, Scene, ScoreWeights, Segment, Signals, Thresholds, Transcript } from "shared";
 import { ARTIFACTS, readKeyed, writeKeyed } from "../lib/artifacts";
 import { hashJson } from "../lib/hash";
@@ -51,15 +52,39 @@ export function findSafeInterval(
   t: Thresholds,
 ): { safe?: Interval; confirmed: boolean; reason?: string } {
   const pad = t.cutPaddingMs / 1000;
-  // Every segment, kept or dropped, counts as occupied time.
+  const lo = Math.min(gap.start, gap.end);
+  const hi = Math.max(gap.start, gap.end);
+  const window = { start: lo - t.boundarySearchSec, end: hi + t.boundarySearchSec };
+  const centre = (lo + hi) / 2;
+
+  // Audio-aligned segments are hard walls; LLM-timed ones are not trusted either way.
+  const walls = segments.filter((s) => !s.approxTiming);
+  const openTime = subtract(window, walls);
+
+  // Measured silence inside the open time must itself be >= minSilenceMs; the cut is then
+  // confined to its padded interior, away from where sound resumes.
+  const quiet = openTime
+    .flatMap((f) => intersect(f, silences))
+    .filter((q) => len(q) * 1000 >= minSilenceMs)
+    .map((q) => ({ start: q.start + pad, end: q.end - pad }));
+  // Longest pause wins (real scene changes pause longest); ties go to the one nearest the estimate.
+  const dist = (q: Interval) => Math.abs((q.start + q.end) / 2 - centre);
+  const confirmed = quiet.sort((a, b) => len(b) - len(a) || dist(a) - dist(b))[0];
+  if (confirmed) return { safe: confirmed, confirmed: true };
+
+  if (t.requireSilenceConfirmation) {
+    return {
+      confirmed: false,
+      reason: `no measured silence of ${minSilenceMs}ms within ±${t.boundarySearchSec}s of the scene change`,
+    };
+  }
+
+  // Legacy path (only when silence confirmation is switched off): strict gap between all segments.
+  if (gap.end <= gap.start) return { confirmed: false, reason: "speech overlaps across the scene boundary" };
   const free = subtract(gap, segments)
     .map((f) => ({ start: f.start + pad, end: f.end - pad }))
     .filter((f) => len(f) > 0);
   if (!free.length) return { confirmed: false, reason: "no speech-free time after padding" };
-
-  const confirmed = longest(free.flatMap((f) => intersect(f, silences)));
-  if (confirmed && len(confirmed) * 1000 >= minSilenceMs) return { safe: confirmed, confirmed: true };
-
   const guard = t.chunkSeamGuardMs / 1000;
   const unconfirmed = longest(
     free.filter((f) => !chunkSeams.some((s) => s > f.start - guard && s < f.end + guard)),
@@ -69,9 +94,7 @@ export function findSafeInterval(
   const best = longest(free)!;
   return {
     confirmed: false,
-    reason: `speech-free gap too short (${Math.round(len(best) * 1000)}ms free, ${Math.round(
-      (confirmed ? len(confirmed) : 0) * 1000,
-    )}ms silence-confirmed; need ${minSilenceMs}ms confirmed or ${t.minGapWithoutSilenceMs}ms unconfirmed away from chunk seams)`,
+    reason: `speech-free gap too short (${Math.round(len(best) * 1000)}ms free; need ${t.minGapWithoutSilenceMs}ms away from chunk seams)`,
   };
 }
 
@@ -86,10 +109,6 @@ export function computeCandidates(inp: CandidateInputs): Candidate[] {
     const c: Candidate = { id: `c${a.id}-${b.id}`, sceneBeforeId: a.id, sceneAfterId: b.id, gap: { start: a.end, end: b.start } };
     out.push(c);
 
-    if (b.start <= a.end) {
-      c.rejected = { stage: "candidates", reason: "speech overlaps across the scene boundary" };
-      continue;
-    }
     const r = findSafeInterval(c.gap, segments, signals.silences, inp.chunkSeams, inp.minSilenceMs, inp.thresholds);
     if (!r.safe) {
       c.rejected = { stage: "candidates", reason: r.reason! };
@@ -129,7 +148,7 @@ export async function runCandidates(ctx: StageContext, scenes: Scene[], transcri
     thresholds: ctx.config.thresholds,
     scoring: ctx.config.scoring,
   };
-  const key = hashJson({ inputs, scenes: hashJson(scenes) });
+  const key = hashJson({ inputs, scenes: hashJson(scenes), segments: hashJson(transcript.segments), signals: hashJson(signals) });
   const cached = ctx.force ? undefined : await readKeyed<Candidate[]>(out, key);
   if (cached) return cached;
 

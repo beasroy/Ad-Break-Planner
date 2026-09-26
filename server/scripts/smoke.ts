@@ -6,7 +6,7 @@ import path from "node:path";
 import { config } from "../src/config";
 import { loadCatalogue } from "../src/catalogue/loader";
 import { run } from "../src/lib/ffmpeg";
-import { chatJson, transcribe } from "../src/lib/openrouter";
+import { chatJson, transcribeWhisper as transcribe } from "../src/lib/openrouter";
 
 const scratch = path.join(config.dataDir, "_smoke");
 await fs.mkdir(scratch, { recursive: true });
@@ -20,7 +20,9 @@ const whisper = await transcribe(audio);
 console.log("=== Whisper top-level keys:", Object.keys(whisper));
 console.log("=== Whisper segment count:", whisper.segments?.length ?? "NO SEGMENTS");
 console.log("=== Whisper segment fields:", whisper.segments?.[0] ? Object.keys(whisper.segments[0]) : "n/a");
-console.log("=== Whisper first 3 segments:", JSON.stringify(whisper.segments?.slice(0, 3), null, 2));
+console.log("=== Whisper segments (start, end, no_speech_prob, avg_logprob):", whisper.segments?.map((s: any) => [s.start, s.end, s.no_speech_prob, s.avg_logprob]));
+console.log("=== Whisper word count:", whisper.words?.length ?? "NO WORDS", "fields:", whisper.words?.[0] ? Object.keys(whisper.words[0]) : "n/a");
+console.log("=== Whisper first 5 words:", JSON.stringify(whisper.words?.slice(0, 5)));
 await fs.writeFile(path.join(scratch, "whisper-raw.json"), JSON.stringify(whisper, null, 2));
 
 // 2. Luna: structured output + one image.

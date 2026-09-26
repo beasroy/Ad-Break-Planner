@@ -30,6 +30,9 @@ export interface Segment {
   noSpeechProb?: number;
   avgLogprob?: number;
   compressionRatio?: number;
+  /** Timing came from an LLM and can drift by seconds; it is not used as a hard wall for cuts
+   *  (measured silence is the proof instead). Whisper timing is audio-aligned and is. */
+  approxTiming?: boolean;
   /** Set when the hallucination filter removed it from the transcript. Still counts as occupied time for cuts. */
   dropped?: { reason: string };
 }

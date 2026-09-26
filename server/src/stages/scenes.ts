@@ -163,6 +163,7 @@ export async function runScenes(ctx: StageContext, transcript: Transcript): Prom
     vocab: ctx.catalogue.negativeVocab,
     model: ctx.config.openrouter.reasonModel,
     w: ctx.config.scenes,
+    transcript: hashJson(transcript.segments.map((x) => [x.id, x.start, x.end, x.text, !!x.dropped])),
   });
   const cached = ctx.force ? undefined : await readKeyed<Scene[]>(out, key);
   if (cached) return cached;

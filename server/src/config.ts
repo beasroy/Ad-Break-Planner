@@ -20,18 +20,33 @@ export const config = {
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     baseUrl: "https://openrouter.ai/api/v1",
-    transcribeModel: process.env.MODEL_TRANSCRIBE ?? "openai/whisper-1",
+    /** "llm": audio-capable chat model with structured output (default; far better Bengali).
+     *  "whisper": /audio/transcriptions endpoint, kept as a fallback. */
+    transcribeProvider: (process.env.TRANSCRIBE_PROVIDER ?? "llm") as "llm" | "whisper",
+    transcribeModel: process.env.MODEL_TRANSCRIBE ?? "google/gemini-3.8-flash",
+    whisperModel: process.env.MODEL_WHISPER ?? "openai/whisper-1",
     reasonModel: process.env.MODEL_REASON ?? "openai/gpt-5.6-luna",
-    transcribeLanguage: "bn",
     requestTimeoutMs: 90_000,
     concurrency: 4,
     retries: 1,
   },
 
+  /** Language of the content; used to prefer matching ad creatives. Not sent to Whisper:
+   *  OpenAI's whisper-1 rejects `language=bn` (400), and auto-detect returns Bengali. */
+  contentLanguage: "bn",
+
+  transcription: {
+    /** Words separated by at least this pause start a new utterance segment. */
+    utterancePauseSec: 0.5,
+    /** Utterances are split once they reach this length. */
+    maxUtteranceSec: 15,
+  },
+
   audio: {
     sampleRate: 16_000,
     bitrate: "32k",
-    chunkSec: 300,
+    /** 2 min keeps LLM transcription timestamps tight and every call well inside timeouts. */
+    chunkSec: 120,
   },
 
   signals: {
@@ -59,9 +74,16 @@ export const config = {
     sceneMinConfidence: 0.6,
     negativeTagMinConfidence: 0.3,
     cutPaddingMs: 150,
+    /** Every cut must sit inside a measured ffmpeg silence window. Transcript timing alone is
+     *  never trusted to prove nobody is speaking (LLM/Whisper timestamps drift, speech gets missed). */
+    requireSilenceConfirmation: true,
+    /** LLM transcript timestamps drift by a few seconds, so look this far either side of the
+     *  estimated scene change for the real pause. The cut still has to be in measured silence. */
+    boundarySearchSec: 3,
     minGapWithoutSilenceMs: 2000,
     chunkSeamGuardMs: 1000,
     hallucinationSilenceOverlap: 0.6,
+    hallucinationNoSpeechProbAlone: 0.9,
     hallucinationNoSpeechProb: 0.6,
     hallucinationAvgLogprob: -1.0,
     hallucinationCompressionRatio: 2.4,
