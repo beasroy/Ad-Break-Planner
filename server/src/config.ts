@@ -89,6 +89,20 @@ export const config = {
     overlapSec: 60,
   },
 
+  /** Final "is anyone speaking at the cut?" gate for brand-matched cuts. */
+  listen: {
+    /** Seconds either side of the cut that must be free of speech. */
+    windowSec: 1,
+    /** Silero VAD (local, free) decides the clear cases. At or above this = speech: reject, no LLM call. */
+    vadSpeechMin: 0.9,
+    /** Below this, and no Deepgram word in the window = quiet: accept, no LLM call. */
+    vadQuietMax: 0.1,
+    /** In between, the audio LLM is asked this many times; any "speech" (with words) or failed call = no ad.
+     *  The LLM is only a tie-breaker: on quiet audio it invents plausible dialogue, so it never decides clear cases. */
+    llmVotes: 2,
+    vadModelPath: resolveFromRoot("server/models/silero_vad.onnx"),
+  },
+
   pacing: {
     maxBreaksPerHour: 4,
     minGapSec: 480,

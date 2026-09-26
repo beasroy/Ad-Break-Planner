@@ -1,12 +1,13 @@
 // Stage 6 ("What"): hard-block eligibility in code, then LLM ranks only eligible brands.
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Brand, Candidate, IngestArtifact, MatchedCandidate, ProgrammeContext, Scene } from "shared";
+import type { Brand, Candidate, IngestArtifact, Interval, MatchedCandidate, ProgrammeContext, Scene } from "shared";
 import { encodeMp3Chunk } from "../../lib/ffmpeg";
 import { ARTIFACTS, readKeyed, writeKeyed } from "../../lib/artifacts";
 import { hashJson } from "../../lib/hash";
 import { chatJson } from "../../lib/openrouter";
 import { mapLimit } from "../../lib/pool";
+import { VAD_VERSION, vadAround } from "../../lib/vad";
 import {
   PROGRAMME_PROMPT_VERSION,
   ProgrammeResponse,
@@ -26,6 +27,7 @@ import {
 } from "../../prompts/listen";
 import { artifactPath, type StageContext } from "../context";
 import { decideEligibility, type EligibilityThresholds } from "./eligibility";
+import { deepgramWordNear, llmVerdict, vadGate, type LlmListenAnswer } from "./listen";
 
 export type RankFn = (before: Scene, after: Scene, eligible: Brand[]) => Promise<MatchedCandidate["ranked"]>;
 
@@ -126,38 +128,85 @@ export async function runProgramme(ctx: StageContext, scenes: Scene[]): Promise<
 }
 
 /**
- * HARD RULE, final gate: an audio LLM listens to a short clip centred on the cut and is
- * asked directly whether anyone speaks within 1s of it. "Yes", or no answer, = no ad.
+ * HARD RULE, final gate: is anyone speaking within ±windowSec of the cut?
+ * 1. Silero VAD on the audio (local, free): clearly speech → no ad; clearly quiet with no
+ *    Deepgram word in the window → accept. No LLM call either way.
+ * 2. Only when VAD is unsure: the audio LLM listens to a 6s clip, `llmVotes` times. Any answer
+ *    that hears words, or any failed call, = no ad.
  */
-async function listenCheck(ctx: StageContext, m: MatchedCandidate, wav: string, durationSec: number) {
+async function listenCheck(ctx: StageContext, m: MatchedCandidate, wav: string, durationSec: number, speech: Interval[]) {
+  const t = ctx.config.listen;
+  const cut = m.cutTime!;
+  let vad;
+  try {
+    vad = await vadAround(t.vadModelPath, wav, cut, t.windowSec);
+  } catch (err) {
+    m.rejected = { stage: "match", reason: `speech check failed, cannot confirm no speech (${(err as Error).message.slice(0, 120)})` };
+    return;
+  }
+  const deepgramNear = deepgramWordNear(speech, cut, t.windowSec);
+  const gate = vadGate(vad, deepgramNear, t);
+  const round = (n: number) => Math.round(n * 1000) / 1000;
+  const base = { vad: { max: round(vad.max), frac: round(vad.frac) }, deepgramNear };
+
+  if (gate !== "unsure") {
+    const speechHeard = gate === "speech";
+    m.listenCheck = {
+      ...base,
+      speech: speechHeard,
+      method: "vad",
+      reason: speechHeard
+        ? `voice activity ${vad.max.toFixed(2)} at the cut (≥ ${t.vadSpeechMin})`
+        : `no voice activity at the cut (${vad.max.toFixed(2)} < ${t.vadQuietMax}) and no Deepgram word within ${t.windowSec}s`,
+    };
+    if (speechHeard) m.rejected = { stage: "match", reason: `speech at the cut: ${m.listenCheck.reason}` };
+    return;
+  }
+
   const dir = artifactPath(ctx, "listen");
   await fs.mkdir(dir, { recursive: true });
-  const start = Math.max(0, m.cutTime! - LISTEN_CUT_AT_SEC);
-  const clip = path.join(dir, `cut_${m.cutTime!.toFixed(3)}.mp3`);
+  const start = Math.max(0, cut - LISTEN_CUT_AT_SEC);
+  const clip = path.join(dir, `cut_${cut.toFixed(3)}.mp3`);
   await encodeMp3Chunk(wav, clip, start, Math.min(LISTEN_CLIP_SEC, durationSec - start), "96k");
-  try {
-    const raw = await chatJson({
-      label: `listen ${m.id}`,
-      model: ctx.config.openrouter.transcribeModel,
-      system: listenSystemPrompt,
-      user: [
-        { type: "text", text: listenUserText },
-        { type: "input_audio", input_audio: { data: (await fs.readFile(clip)).toString("base64"), format: "mp3" } },
-      ],
-      schemaName: "listen_check",
-      schema: listenJsonSchema,
-    });
-    const r = ListenResponse.parse(raw);
-    m.listenCheck = { speech: r.speech_near_mark || r.heard_at_mark === "speech", heard: r.heard_at_mark, transcript: r.transcript };
-    if (m.listenCheck.speech) {
-      m.rejected = { stage: "match", reason: `listening check heard speech at the cut (${r.transcript.slice(0, 120) || r.heard_at_mark})` };
-    }
-  } catch (err) {
-    m.rejected = { stage: "match", reason: `listening check failed, cannot confirm no speech (${(err as Error).message.slice(0, 120)})` };
-  }
+  const data = (await fs.readFile(clip)).toString("base64");
+  const answers = await Promise.all(
+    Array.from({ length: t.llmVotes }, (_, i) =>
+      chatJson({
+        label: `listen ${m.id} #${i + 1}`,
+        model: ctx.config.openrouter.transcribeModel,
+        system: listenSystemPrompt,
+        user: [
+          { type: "text", text: listenUserText },
+          { type: "input_audio", input_audio: { data, format: "mp3" } },
+        ],
+        schemaName: "listen_check",
+        schema: listenJsonSchema,
+      })
+        .then((raw): LlmListenAnswer => ListenResponse.parse(raw))
+        .catch((err: unknown) => (err instanceof Error ? err : new Error(String(err)))),
+    ),
+  );
+  const verdict = llmVerdict(answers);
+  m.listenCheck = {
+    ...base,
+    speech: verdict.speech,
+    method: "llm",
+    answers: answers
+      .filter((a): a is LlmListenAnswer => !(a instanceof Error))
+      .map((a) => ({ speechNearMark: a.speech_near_mark, heard: a.heard_at_mark, transcript: a.transcript })),
+    reason: `voice activity ${vad.max.toFixed(2)} is unclear; ${verdict.reason}`,
+  };
+  if (verdict.speech) m.rejected = { stage: "match", reason: verdict.reason };
 }
 
-export async function runMatch(ctx: StageContext, candidates: Candidate[], scenes: Scene[], ingest: IngestArtifact) {
+export async function runMatch(
+  ctx: StageContext,
+  candidates: Candidate[],
+  scenes: Scene[],
+  ingest: IngestArtifact,
+  /** Deepgram word intervals (transcript.speech): a word near the cut sends it to the LLM. */
+  speech: Interval[],
+) {
   const out = artifactPath(ctx, ARTIFACTS.matches);
   const key = hashJson({
     v: RANK_PROMPT_VERSION,
@@ -167,7 +216,14 @@ export async function runMatch(ctx: StageContext, candidates: Candidate[], scene
     candidates: hashJson(candidates),
     scenes: hashJson(scenes),
     programme: PROGRAMME_PROMPT_VERSION,
-    listen: [LISTEN_PROMPT_VERSION, ctx.config.thresholds.listenCheckCuts, ctx.config.openrouter.transcribeModel],
+    listen: [
+      LISTEN_PROMPT_VERSION,
+      VAD_VERSION,
+      ctx.config.listen,
+      ctx.config.thresholds.listenCheckCuts,
+      ctx.config.openrouter.transcribeModel,
+      hashJson(speech),
+    ],
   });
   const cached = ctx.force ? undefined : await readKeyed<(Candidate | MatchedCandidate)[]>(out, key);
   if (cached) return cached;
@@ -183,9 +239,15 @@ export async function runMatch(ctx: StageContext, candidates: Candidate[], scene
   );
   if (ctx.config.thresholds.listenCheckCuts) {
     const toCheck = matched.filter((c): c is MatchedCandidate => !c.rejected && "ranked" in c && c.cutTime !== undefined);
-    await mapLimit(toCheck, ctx.config.openrouter.concurrency, (m) => listenCheck(ctx, m, ingest.fullAudio, ingest.meta.durationSec));
-    const heard = toCheck.filter((m) => m.listenCheck?.speech).length;
-    ctx.log(`match: listening check on ${toCheck.length} cuts, ${heard} rejected for speech`);
+    await mapLimit(toCheck, ctx.config.openrouter.concurrency, (m) =>
+      listenCheck(ctx, m, ingest.fullAudio, ingest.meta.durationSec, speech),
+    );
+    const by = (method: string, speechHeard: boolean) =>
+      toCheck.filter((m) => m.listenCheck?.method === method && m.listenCheck.speech === speechHeard).length;
+    ctx.log(
+      `match: speech check on ${toCheck.length} cuts: VAD clear ${by("vad", false)}, VAD speech ${by("vad", true)}, ` +
+        `LLM clear ${by("llm", false)}, LLM speech ${by("llm", true)}, failed ${toCheck.filter((m) => !m.listenCheck).length}`,
+    );
   }
 
   await writeKeyed(out, key, matched);

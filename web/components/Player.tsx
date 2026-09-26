@@ -8,8 +8,6 @@ type ScheduledBreak = VmapBreak & { ad: VastAd };
 
 /** Seconds of playback before a break that "Jump" lands on. */
 const JUMP_LEAD_SEC = 5;
-/** A time jump larger than this between frames is a seek, not playback: skipped breaks don't fire. */
-const MAX_PLAYBACK_STEP_SEC = 1.5;
 const EMPTY_VTT = "data:text/vtt;charset=utf-8,WEBVTT";
 
 export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapUrl: string }>) {
@@ -41,26 +39,32 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
     setActiveAd(b);
   }, []);
 
-  // Frame-accurate break detection while the episode plays.
+  // Fires a break when playback crosses its cut. Seeks never count: `seeking` moves lastTimeRef
+  // to the new position first, so a jump over a break skips it (as in any ad-enabled player).
+  const checkBreak = useCallback(() => {
+    const content = contentRef.current;
+    if (!content || inAdRef.current || content.seeking) return;
+    const t = content.currentTime;
+    const prev = lastTimeRef.current;
+    lastTimeRef.current = t;
+    setTime(t);
+    if (!content.paused && t > prev) {
+      const due = schedule.find((b) => !playedRef.current.has(b.breakId) && prev < b.timeSec && b.timeSec <= t);
+      if (due) startAd(due); // rewinds to the exact cut if detection ran a little late
+    }
+  }, [schedule, startAd]);
+
+  // Frame-accurate while the tab is visible. Browsers stop animation frames in background tabs,
+  // so the video's own timeupdate events (below) keep breaks firing there too.
   useEffect(() => {
     let raf = 0;
     const tick = () => {
-      const content = contentRef.current;
-      if (content && !inAdRef.current) {
-        const t = content.currentTime;
-        const prev = lastTimeRef.current;
-        lastTimeRef.current = t;
-        setTime(t);
-        if (!content.paused && t > prev && t - prev < MAX_PLAYBACK_STEP_SEC) {
-          const due = schedule.find((b) => !playedRef.current.has(b.breakId) && prev < b.timeSec && b.timeSec <= t);
-          if (due) startAd(due);
-        }
-      }
+      checkBreak();
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [schedule, startAd]);
+  }, [checkBreak]);
 
   // Play the ad once its element mounts.
   useEffect(() => {
@@ -102,7 +106,13 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
           controls={!activeAd}
           className="w-full h-full"
           onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+          onTimeUpdate={checkBreak}
+          onSeeking={(e) => (lastTimeRef.current = e.currentTarget.currentTime)}
           onSeeked={(e) => (lastTimeRef.current = e.currentTarget.currentTime)}
+          onPlay={(e) => {
+            // The episode stays held at the cut while an ad runs (media keys, browser media controls).
+            if (inAdRef.current) e.currentTarget.pause();
+          }}
         >
           <track kind="captions" src={EMPTY_VTT} label="Captions" />
         </video>

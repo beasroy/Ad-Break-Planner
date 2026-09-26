@@ -1,14 +1,15 @@
 import { z } from "zod";
 import type { Brand, ProgrammeContext, Scene } from "shared";
 
-export const RANK_PROMPT_VERSION = 2;
+/** v3: fit comes only from the two scenes next to the break; the programme is background, never a reason. */
+export const RANK_PROMPT_VERSION = 3;
 
 export const rankSystemPrompt = [
   "You match an ad break in a Bengali TV programme to the most contextually relevant brands.",
-  "The ad plays right after the 'scene before'. A brand fits when its target contexts relate to what viewers just watched (activity, setting, objects, mood).",
-  "The 'programme' describes the whole episode. A brand that matches the programme's overall theme or recurring contexts is relevant to its audience even when these two scenes don't show it: give it a moderate fit (about 0.5–0.7). The scenes around the break still matter most; a direct scene match scores highest.",
-  "Score every listed brand. fit (0–1): 0 = unrelated, 0.5 = loosely related, 1 = directly matches the scene's activity.",
-  "reason: one short English sentence referring to the scene or programme. Use only the brand ids provided.",
+  "The ad plays between 'scene_before' and 'scene_after'. Judge fit ONLY from these two scenes: their activity, setting, objects and mood.",
+  "'programme' describes the whole episode. Use it only to understand what the two scenes show. A brand that matches the programme's theme or recurring contexts but nothing in these two scenes is NOT relevant: give it fit 0.2 or lower.",
+  "Score every listed brand. fit (0–1): 0 = unrelated to both scenes, 0.5 = loosely related to something in them, 1 = directly matches what a scene shows.",
+  "reason: one short English sentence naming what in scene_before or scene_after the brand relates to. Use only the brand ids provided.",
 ].join("\n");
 
 export function rankUserPrompt(before: Scene, after: Scene, brands: Brand[], programme?: ProgrammeContext): string {

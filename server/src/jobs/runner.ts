@@ -102,7 +102,7 @@ export async function runPipeline(
   const transcript = await runTranscribe(ctx, ingest, raw, signals);
   const scenes = await stage("scenes", () => runScenes(ctx, transcript));
   const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals, ingest));
-  const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest));
+  const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest, transcript.speech ?? []));
   const selection = await stage("select", () => runSelect(ctx, matched, ingest.meta.durationSec));
   await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, scenes, matched, selection));
   return { durationSec: ingest.meta.durationSec, breakCount: selection.breaks.length };

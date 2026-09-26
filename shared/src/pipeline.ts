@@ -132,8 +132,18 @@ export interface Candidate {
   cutBasis?: "silence" | "speechFree";
   /** Independent re-listen of just the cut window (Deepgram on a short clip). */
   recheck?: { heardWords: number; moved: boolean };
-  /** Final listening check at the exact cut (audio LLM on a short clip): is anyone speaking? */
-  listenCheck?: { speech: boolean; heard: string; transcript: string };
+  /**
+   * Final "is anyone speaking within ±1s of the cut?" gate. Silero VAD decides clear cases
+   * (method "vad"); only when it is unsure is the audio LLM asked (method "llm").
+   */
+  listenCheck?: {
+    speech: boolean;
+    method: "vad" | "llm";
+    vad: { max: number; frac: number };
+    deepgramNear: boolean;
+    answers?: { speechNearMark: boolean; heard: string; transcript: string }[];
+    reason: string;
+  };
   where?: WhereScore;
   rejected?: Rejection;
 }

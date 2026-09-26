@@ -94,6 +94,7 @@ switch (stage) {
       await need<Candidate[]>(ARTIFACTS.candidates),
       await need<Scene[]>(ARTIFACTS.scenes),
       await need<IngestArtifact>(ARTIFACTS.ingest),
+      (await need<Transcript>(ARTIFACTS.transcript)).speech ?? [],
     );
     break;
   case "select":
