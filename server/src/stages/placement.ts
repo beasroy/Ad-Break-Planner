@@ -1,8 +1,8 @@
 // LLM ad placement (config.placement.mode = "llm"). One LLM call per transcription chunk (the audio
 // pieces from ingest) reads that chunk's dialogue, with the measured silences and shot cuts written
 // in, and picks the line after which an ad plays and the brand. The model only makes the judgement
-// call. Code decides where exactly the cut goes and enforces every safety rule (minimum gap, ad
-// load, negative contexts, speech at the cut, previous brand); a pick that
+// call. Code decides where exactly the cut goes and enforces every safety rule (minimum gap, no ads in
+// the last minutes, ad load, negative contexts, speech at the cut, previous brand); a pick that
 // fails falls back to the model's alternatives, and if none pass the chunk stays empty.
 import fs from "node:fs/promises";
 import type { Brand, Break, Catalogue, IngestArtifact, Interval, MatchedCandidate, ProgrammeContext, Segment, SelectionLog, Signals, Transcript } from "shared";
@@ -24,7 +24,7 @@ import { listenCheck } from "./match";
 import { pickCreative } from "./select";
 
 /** Bump when the chunk, cut or check logic below changes, so cached placements are recomputed. */
-export const PLACEMENT_LOGIC_VERSION = 8;
+export const PLACEMENT_LOGIC_VERSION = 10;
 
 /** Tolerance for "at least N seconds" on times that are sums of floats (1.5 s must not come out as 1.4999…). */
 const EPS = 1e-6;
@@ -238,8 +238,9 @@ export async function runPlacement(
   const brands = ctx.catalogue.brands;
   const blockAll = blockAllContexts(ctx.catalogue, cfg.thresholds.consensusNegativeShare);
   const brandName = (id?: string) => (id ? brands.find((b) => b.id === id)?.name ?? id : undefined);
-  // One window per transcription chunk.
-  const windows = ingest.chunks.map((c) => ({ chunk: c.index + 1, from: c.offsetSec, to: c.offsetSec + c.durationSec }));
+  // One window per transcription chunk, ending where the no-ad zone at the end of the episode starts.
+  const lastAdSec = duration - cfg.placement.noAdLastSec;
+  const windows = ingest.chunks.map((c) => ({ chunk: c.index + 1, from: c.offsetSec, to: Math.min(c.offsetSec + c.durationSec, lastAdSec) }));
 
   const logs: SlotLog[] = [];
   const breaks: Break[] = [];
@@ -258,7 +259,12 @@ export async function runPlacement(
     const log: SlotLog = { slot: w.chunk, window: [from, w.to], currentLines: current.length, options: [] };
     logs.push(log);
     if (!current.length) {
-      log.error = from >= w.to ? "the whole chunk is within the minimum gap after the previous ad" : "no dialogue in this chunk";
+      log.error =
+        w.from >= w.to
+          ? `in the last ${cfg.placement.noAdLastSec}s of the episode, where no ad plays`
+          : from >= w.to
+            ? "the whole chunk is within the minimum gap after the previous ad"
+            : "no dialogue in this chunk";
       continue;
     }
     const sig = { silences, shotCuts };
@@ -327,6 +333,10 @@ export async function runPlacement(
       }
       entry.cutTime = cut.cutTime;
       entry.basis = cut.basis;
+      if (cut.cutTime > lastAdSec) {
+        entry.problems.push(`in the last ${cfg.placement.noAdLastSec}s of the episode, where no ad plays`);
+        continue;
+      }
       entry.problems.push(
         ...checkOption(
           { brandId: o.brand_id, fit: o.fit },

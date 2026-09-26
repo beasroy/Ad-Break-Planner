@@ -99,6 +99,8 @@ export const config = {
     contextSec: 90,
     /** Minimum seconds between two ads in llm mode (the rules mode uses pacing.minGapSec). */
     minGapSec: 300,
+    /** No ad in the last this-many seconds of the episode (llm mode). */
+    noAdLastSec: 90,
     /** Measured silences shorter than this are not shown to the model. */
     showSilenceMinSec: 0.5,
   },
