@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Hoichoi Ad Break Planner",
+  title: "Cuepoint Ad Break Planner",
   description: "Context-aware ad break placement for Bengali dramas",
 };
 
@@ -25,7 +25,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <header className="sticky top-0 z-10 border-b border-border bg-background/90 backdrop-blur">
           <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-4">
             <Link href="/" className="font-semibold tracking-[0.2em] uppercase text-accent-strong">
-              hoichoi
+              cuepoint
             </Link>
             <span className="hidden h-4 w-px bg-border sm:block" />
             <span className="text-sm text-muted">ad break planner</span>
