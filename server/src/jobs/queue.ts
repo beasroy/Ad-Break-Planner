@@ -38,7 +38,14 @@ export function classifyError(err: unknown): { message: string; stage?: string; 
   return { message, stage, retryable: !(cause instanceof PermanentError) };
 }
 
-export function createQueue(opts: { repo: Repo; run: RunFn; config: QueueConfig; workerId?: string }) {
+export function createQueue(opts: {
+  repo: Repo;
+  run: RunFn;
+  config: QueueConfig;
+  workerId?: string;
+  /** The live catalogue's hash: a job that finishes with a different one is re-run straight away. */
+  currentCatalogueHash?: () => string | undefined;
+}) {
   const { repo, run, config: q } = opts;
   const workerId = opts.workerId ?? `${os.hostname()}:${process.pid}`;
   const active = new Map<string, Promise<void>>();
@@ -66,6 +73,11 @@ export function createQueue(opts: { repo: Repo; run: RunFn; config: QueueConfig;
       );
       repo.succeed(job.id, workerId, job.attempt, result);
       console.log(`[queue] ${job.id} attempt ${job.attempt} succeeded (${result.breakCount} breaks)`);
+      // The catalogue changed while this job ran: its breaks were chosen with the old one.
+      const now = opts.currentCatalogueHash?.();
+      if (now && result.catalogueHash !== now && repo.rerun(job.id, q.maxAttempts, "catalogue changed during processing")) {
+        console.log(`[queue] ${job.id} re-queued: the catalogue changed while it was processing`);
+      }
     } catch (err) {
       const e = classifyError(err);
       const outcome = repo.fail(job.id, workerId, job.attempt, {

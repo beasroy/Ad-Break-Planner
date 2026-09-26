@@ -1,13 +1,13 @@
 import { Router } from "express";
 import { config } from "../config";
-import { loadCatalogue } from "../catalogue/loader";
+import { loadCatalogue } from "../catalogue/store";
 import { exists } from "../lib/artifacts";
 import { buildVast } from "../xml/vast";
 
 export const adsRouter = Router();
 
 async function findCreative(brandId: string, creativeId?: string) {
-  const catalogue = await loadCatalogue(config.cataloguePath);
+  const catalogue = await loadCatalogue();
   const brand = catalogue.brands.find((b) => b.id === brandId);
   const creative = brand && (creativeId ? brand.creatives.find((c) => c.id === creativeId) : brand.creatives[0]);
   return brand && creative ? { brand, creative } : undefined;

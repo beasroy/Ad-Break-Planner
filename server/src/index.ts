@@ -3,7 +3,7 @@ import express, { type ErrorRequestHandler } from "express";
 import cors from "cors";
 import { config } from "./config";
 import { assertFfmpegAvailable } from "./lib/ffmpeg";
-import { loadCatalogue } from "./catalogue/loader";
+import { currentCatalogueHash, loadCatalogue, seedCatalogueIfEmpty } from "./catalogue/store";
 import { initDb } from "./db";
 import { createQueue } from "./jobs/queue";
 import { runPipeline } from "./jobs/runner";
@@ -15,15 +15,16 @@ async function main() {
   await assertFfmpegAvailable();
   if (!config.openrouter.apiKey) console.warn("WARNING: OPENROUTER_API_KEY is not set; AI stages will fail.");
 
-  const catalogue = await loadCatalogue(config.cataloguePath);
-  console.log(`Catalogue: ${catalogue.brands.length} brands, ${catalogue.negativeVocab.length} negative contexts`);
-
   await fs.mkdir(config.dataDir, { recursive: true });
   const repo = initDb(config.dbPath);
   console.log(`Database: ${config.dbPath}`);
+  const seeded = await seedCatalogueIfEmpty();
+  if (seeded) console.log(`Catalogue seeded from ${config.cataloguePath}: ${seeded} brands`);
+  const catalogue = await loadCatalogue();
+  console.log(`Catalogue: ${catalogue.brands.length} brands, ${catalogue.negativeVocab.length} negative contexts`);
   await importLegacyJobs();
 
-  const queue = createQueue({ repo, run: runPipeline, config: config.queue });
+  const queue = createQueue({ repo, run: runPipeline, config: config.queue, currentCatalogueHash });
   queueSignal.notify = queue.notify;
   queue.start();
   // On shutdown, hand running jobs back to the queue at once so the next start resumes them.

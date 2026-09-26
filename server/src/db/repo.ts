@@ -13,11 +13,23 @@ import {
   type StageName,
   type StageStatus,
 } from "shared";
+import type { RawBrandData } from "../catalogue/loader";
 import { MIGRATIONS } from "./schema";
 
 type Row = Record<string, any>;
 type Clock = () => Date;
 export type Repo = ReturnType<typeof createRepo>;
+export type BrandSource = "seed" | "ui" | "import";
+
+export interface CatalogueEvent {
+  id: number;
+  at: string;
+  actor: "api" | "system";
+  type: string;
+  brandId?: string;
+  ip?: string;
+  detail?: Record<string, unknown>;
+}
 
 /** Who asked for an API action, for the audit trail. */
 export interface Requester {
@@ -460,6 +472,101 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
         audit({ jobId, actor: "api", type: "job.deleted", requester, detail: { previousStatus: r.status, originalName: r.original_name } });
         return { fileHash: r.file_hash };
       });
+    },
+
+    // ---- Brand catalogue
+
+    /** The catalogue in JSON shape, in catalogue order. */
+    listBrandsRaw(): RawBrandData[] {
+      const creatives = db.prepare("SELECT * FROM brand_creatives ORDER BY brand_id, position").all() as Row[];
+      return (db.prepare("SELECT * FROM brands ORDER BY position").all() as Row[]).map((b) => ({
+        brand_id: b.id,
+        display_name: b.name,
+        category: b.category,
+        target_contexts: JSON.parse(b.target_contexts),
+        negative_contexts: JSON.parse(b.negative_contexts),
+        ...(b.headline !== null && { headline: b.headline }),
+        ...(b.tagline !== null && { tagline: b.tagline }),
+        creatives: creatives
+          .filter((c) => c.brand_id === b.id)
+          .map((c) => ({ id: c.id, duration_sec: c.duration_sec, language: c.language, url: c.url })),
+      }));
+    },
+
+    brandSources(): Record<string, { source: BrandSource; createdAt: string; updatedAt: string }> {
+      return Object.fromEntries(
+        (db.prepare("SELECT id, source, created_at, updated_at FROM brands").all() as Row[]).map((r) => [
+          r.id,
+          { source: r.source, createdAt: r.created_at, updatedAt: r.updated_at },
+        ]),
+      );
+    },
+
+    /**
+     * Writes the whole catalogue in one transaction (the caller has validated it). Brands keep
+     * their created_at and source; updated_at moves only for brands whose content changed.
+     */
+    replaceCatalogue(list: RawBrandData[], sourceForNew: BrandSource) {
+      tx(() => {
+        const before = new Map(
+          (db.prepare("SELECT * FROM brands").all() as Row[]).map((r) => [r.id as string, r]),
+        );
+        const oldRaw = new Map(api.listBrandsRaw().map((b) => [b.brand_id, JSON.stringify(b)]));
+        const t = now();
+        db.exec("DELETE FROM brand_creatives; DELETE FROM brands;");
+        const insB = db.prepare(
+          `INSERT INTO brands (id, position, name, category, target_contexts, negative_contexts, headline, tagline, source, created_at, updated_at)
+           VALUES (@id, @pos, @name, @cat, @tc, @nc, @hl, @tl, @src, @created, @updated)`,
+        );
+        const insC = db.prepare(
+          "INSERT INTO brand_creatives (brand_id, id, position, duration_sec, language, url) VALUES (?, ?, ?, ?, ?, ?)",
+        );
+        list.forEach((b, pos) => {
+          const prev = before.get(b.brand_id);
+          const changed = oldRaw.get(b.brand_id) !== JSON.stringify(b);
+          insB.run({
+            id: b.brand_id,
+            pos,
+            name: b.display_name,
+            cat: b.category ?? "",
+            tc: JSON.stringify(b.target_contexts ?? []),
+            nc: JSON.stringify(b.negative_contexts ?? []),
+            hl: nul(b.headline),
+            tl: nul(b.tagline),
+            src: prev?.source ?? sourceForNew,
+            created: prev?.created_at ?? t,
+            updated: prev && !changed ? prev.updated_at : t,
+          });
+          b.creatives.forEach((c, i) => insC.run(b.brand_id, c.id, i, c.duration_sec, c.language ?? "", c.url));
+        });
+      });
+    },
+
+    catalogueEvent(e: { actor: "api" | "system"; type: string; brandId?: string; requester?: Requester; detail?: Record<string, unknown> }) {
+      db.prepare(
+        `INSERT INTO catalogue_events (at, actor, type, brand_id, ip, user_agent, detail)
+         VALUES (@at, @actor, @type, @brand, @ip, @ua, @detail)`,
+      ).run({
+        at: now(),
+        actor: e.actor,
+        type: e.type,
+        brand: nul(e.brandId),
+        ip: nul(e.requester?.ip),
+        ua: nul(e.requester?.userAgent),
+        detail: e.detail ? JSON.stringify(e.detail) : null,
+      });
+    },
+
+    listCatalogueEvents(limit = 100): CatalogueEvent[] {
+      return (db.prepare("SELECT * FROM catalogue_events ORDER BY id DESC LIMIT ?").all(limit) as Row[]).map((e) => ({
+        id: e.id,
+        at: e.at,
+        actor: e.actor,
+        type: e.type,
+        brandId: opt(e.brand_id),
+        ip: opt(e.ip),
+        detail: e.detail ? JSON.parse(e.detail) : undefined,
+      }));
     },
 
     recordModelCall(c: Omit<ModelCall, "id">) {

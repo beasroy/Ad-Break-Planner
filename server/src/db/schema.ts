@@ -93,4 +93,44 @@ export const MIGRATIONS: string[] = [
   /* 2: which brand catalogue a finished job used, so a catalogue change can mark it stale */ `
   ALTER TABLE jobs ADD COLUMN catalogue_hash TEXT;
   `,
+  /* 3: the brand catalogue (was catalogue/brands.json, which now only seeds an empty database) */ `
+  CREATE TABLE brands (
+    id                 TEXT PRIMARY KEY,           -- brand_id in the catalogue JSON
+    position           INTEGER NOT NULL,           -- catalogue order (kept so the catalogue hash is stable)
+    name               TEXT NOT NULL,
+    category           TEXT NOT NULL DEFAULT '',
+    target_contexts    TEXT NOT NULL,              -- JSON array of strings
+    negative_contexts  TEXT NOT NULL,              -- JSON array of strings
+    headline           TEXT,
+    tagline            TEXT,
+    source             TEXT NOT NULL CHECK (source IN ('seed','ui','import')),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+  );
+
+  CREATE TABLE brand_creatives (
+    brand_id      TEXT NOT NULL REFERENCES brands (id) ON DELETE CASCADE,
+    id            TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    duration_sec  REAL NOT NULL,
+    language      TEXT NOT NULL DEFAULT '',
+    url           TEXT NOT NULL,                  -- media file, relative to the catalogue folder
+    PRIMARY KEY (brand_id, id)
+  );
+
+  CREATE TABLE catalogue_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT NOT NULL,
+    actor       TEXT NOT NULL CHECK (actor IN ('api','system')),
+    type        TEXT NOT NULL,                    -- catalogue.seeded, brand.created, brand.deleted, catalogue.imported, ...
+    brand_id    TEXT,
+    ip          TEXT,
+    user_agent  TEXT,
+    detail      TEXT                              -- JSON
+  );
+  CREATE TRIGGER catalogue_events_no_update BEFORE UPDATE ON catalogue_events
+    BEGIN SELECT RAISE(ABORT, 'catalogue_events is append-only'); END;
+  CREATE TRIGGER catalogue_events_no_delete BEFORE DELETE ON catalogue_events
+    BEGIN SELECT RAISE(ABORT, 'catalogue_events is append-only'); END;
+  `,
 ];

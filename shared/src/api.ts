@@ -78,6 +78,14 @@ export interface ListBrandsResponse {
 export interface BrandChangeResponse {
   brand?: BrandSummary;
   requeuedJobs: string[];
-  /** Set when a creative could not be generated and a plain placeholder was used instead. */
-  warning?: string;
+}
+
+/** POST /api/brands/import */
+export interface ImportCatalogueResponse {
+  added: string[];
+  updated: string[];
+  removed: string[];
+  /** Creatives whose files were missing and got a title-card ad. */
+  generatedCreatives: number;
+  requeuedJobs: string[];
 }

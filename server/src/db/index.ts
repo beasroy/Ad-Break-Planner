@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { withStaleFlag } from "../catalogue/current";
+import { withStaleFlag } from "../catalogue/store";
 import { publishJobEvent } from "../jobs/events";
 import { createRepo, openDb, type Repo } from "./repo";
 

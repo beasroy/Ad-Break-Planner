@@ -12,8 +12,7 @@ import type {
   ListJobsResponse,
 } from "shared";
 import { config } from "../config";
-import { loadCatalogue } from "../catalogue/loader";
-import { withStaleFlag } from "../catalogue/current";
+import { loadCatalogue, withStaleFlag } from "../catalogue/store";
 import { getRepo, type Requester } from "../db";
 import { ARTIFACTS, exists, readJson, writeJson } from "../lib/artifacts";
 import { hashFile } from "../lib/hash";
@@ -182,7 +181,7 @@ async function loadBreaks(job: Job): Promise<{ breaks: (Break & { brandName: str
   const debugPath = path.join(dir, ARTIFACTS.debug);
   if (job.status !== "done" || !(await exists(debugPath))) return undefined;
   const debug = await readJson<DebugReport>(debugPath);
-  const catalogue = await loadCatalogue(config.cataloguePath);
+  const catalogue = await loadCatalogue();
   const nameOf = (id: string) => catalogue.brands.find((b) => b.id === id)?.name ?? id;
   return { durationSec: debug.meta.durationSec, breaks: debug.breaks.map((b) => ({ ...b, brandName: nameOf(b.brandId) })) };
 }

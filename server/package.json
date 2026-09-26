@@ -8,11 +8,12 @@
     "start": "tsx --disable-warning=ExperimentalWarning src/index.ts",
     "smoke": "tsx scripts/smoke.ts",
     "stage": "tsx scripts/stage.ts",
-    "creatives": "tsx scripts/make-creatives.ts",
+    "creatives": "tsx --disable-warning=ExperimentalWarning scripts/make-creatives.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "cors": "^2.8.6",
     "dotenv": "^18.0.4",
     "express": "^5.2.1",

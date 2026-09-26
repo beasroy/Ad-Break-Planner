@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { StageName, StageStatus } from "shared";
 import { config } from "../config";
-import { loadCatalogue } from "../catalogue/loader";
+import { loadCatalogue } from "../catalogue/store";
 import { ARTIFACTS } from "../lib/artifacts";
 import { withCallContext } from "../lib/callContext";
 import { PermanentError } from "../lib/errors";
@@ -91,7 +91,7 @@ export async function runPipeline(
   const videoPath = await findSourceVideo(dir);
   if (!videoPath) throw new PermanentError(`source video missing in ${dir}`);
   // Catalogue is re-read for every run so a changed/added brand needs no restart.
-  const catalogue = await loadCatalogue(config.cataloguePath);
+  const catalogue = await loadCatalogue();
   const ctx: StageContext = makeContext({ jobId: job.id, dir, videoPath, catalogue, force: opts.force });
 
   const ingest = await stage("ingest", () => runIngest(ctx));

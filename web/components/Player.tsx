@@ -8,7 +8,23 @@ type ScheduledBreak = VmapBreak & { ad: VastAd };
 
 /** Seconds of playback before a break that "Jump" lands on. */
 const JUMP_LEAD_SEC = 5;
+/** Cross-fade between episode and ad, in and out. */
+const FADE_MS = 500;
+/** The episode's sound fades down over this long before a cut, so the break never chops a sound. */
+const DUCK_SEC = 0.35;
 const EMPTY_VTT = "data:text/vtt;charset=utf-8,WEBVTT";
+
+/** Ramps an element's volume; uses timers (not animation frames) so it also runs in background tabs. */
+function rampVolume(el: HTMLMediaElement, to: number, ms: number) {
+  const from = el.volume;
+  const start = performance.now();
+  const id = setInterval(() => {
+    const k = Math.min(1, (performance.now() - start) / ms);
+    el.volume = Math.max(0, Math.min(1, from + (to - from) * k));
+    if (k >= 1) clearInterval(id);
+  }, 25);
+  return () => clearInterval(id);
+}
 
 export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapUrl: string }>) {
   const contentRef = useRef<HTMLVideoElement>(null);
@@ -16,12 +32,17 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
   const lastTimeRef = useRef(0);
   const playedRef = useRef(new Set<string>());
   const inAdRef = useRef(false);
+  /** The viewer's volume, remembered while the episode is faded down around a break. */
+  const baseVolumeRef = useRef<number | null>(null);
+  const leavingRef = useRef(false);
 
   const [schedule, setSchedule] = useState<ScheduledBreak[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
   const [time, setTime] = useState(0);
   const [activeAd, setActiveAd] = useState<ScheduledBreak | null>(null);
+  /** Drives the fade: the ad layer is mounted first, then shown, then hidden before it unmounts. */
+  const [adShown, setAdShown] = useState(false);
   const [adRemaining, setAdRemaining] = useState(0);
   const [played, setPlayed] = useState<string[]>([]);
 
@@ -34,9 +55,14 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
   const startAd = useCallback((b: ScheduledBreak) => {
     const content = contentRef.current!;
     inAdRef.current = true;
+    leavingRef.current = false;
+    baseVolumeRef.current ??= content.volume;
+    content.volume = 0;
     content.pause();
     content.currentTime = b.timeSec; // resume exactly at the cut point
+    setAdShown(false);
     setActiveAd(b);
+    requestAnimationFrame(() => requestAnimationFrame(() => setAdShown(true))); // mount at opacity 0, then fade in
   }, []);
 
   // Fires a break when playback crosses its cut. Seeks never count: `seeking` moves lastTimeRef
@@ -50,7 +76,16 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
     setTime(t);
     if (!content.paused && t > prev) {
       const due = schedule.find((b) => !playedRef.current.has(b.breakId) && prev < b.timeSec && b.timeSec <= t);
-      if (due) startAd(due); // rewinds to the exact cut if detection ran a little late
+      if (due) return startAd(due); // rewinds to the exact cut if detection ran a little late
+    }
+    // Fade the episode's sound down just before a cut; restore it if playback moves away instead.
+    const next = content.paused ? undefined : schedule.find((b) => !playedRef.current.has(b.breakId) && b.timeSec > t && b.timeSec - t < DUCK_SEC);
+    if (next) {
+      baseVolumeRef.current ??= content.volume;
+      content.volume = baseVolumeRef.current * Math.max(0, (next.timeSec - t) / DUCK_SEC);
+    } else if (baseVolumeRef.current !== null) {
+      content.volume = baseVolumeRef.current;
+      baseVolumeRef.current = null;
     }
   }, [schedule, startAd]);
 
@@ -66,21 +101,40 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
     return () => cancelAnimationFrame(raf);
   }, [checkBreak]);
 
-  // Play the ad once its element mounts.
+  // Play the ad once its element mounts, its sound fading in with the picture.
   useEffect(() => {
-    if (activeAd) adRef.current?.play().catch(() => {});
+    const ad = adRef.current;
+    if (!activeAd || !ad) return;
+    ad.volume = 0;
+    ad.play().catch(() => {});
+    return rampVolume(ad, 1, FADE_MS);
   }, [activeAd]);
 
-  const endAd = () => {
-    if (!activeAd) return;
-    playedRef.current.add(activeAd.breakId);
+  /** Back to the episode at the exact cut, sound fading up. */
+  const resumeEpisode = (b: ScheduledBreak) => {
+    playedRef.current.add(b.breakId);
     setPlayed([...playedRef.current]);
     const content = contentRef.current!;
-    content.currentTime = activeAd.timeSec;
-    lastTimeRef.current = activeAd.timeSec;
+    content.currentTime = b.timeSec;
+    lastTimeRef.current = b.timeSec;
     inAdRef.current = false;
+    leavingRef.current = false;
     setActiveAd(null);
+    content.volume = 0;
     content.play().catch(() => {});
+    rampVolume(content, baseVolumeRef.current ?? 1, FADE_MS);
+    baseVolumeRef.current = null;
+  };
+
+  /** Ad finished: fade it out to the paused episode frame, then resume. A broken ad skips the fade. */
+  const endAd = (fade = true) => {
+    if (!activeAd || leavingRef.current) return;
+    leavingRef.current = true;
+    const b = activeAd;
+    if (!fade) return resumeEpisode(b);
+    setAdShown(false);
+    if (adRef.current) rampVolume(adRef.current, 0, FADE_MS);
+    setTimeout(() => resumeEpisode(b), FADE_MS);
   };
 
   const seek = (t: number) => {
@@ -117,14 +171,17 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
           <track kind="captions" src={EMPTY_VTT} label="Captions" />
         </video>
         {activeAd && (
-          <div className="absolute inset-0 bg-black">
+          <div
+            className={`absolute inset-0 bg-black transition-opacity ease-out ${adShown ? "opacity-100" : "opacity-0"}`}
+            style={{ transitionDuration: `${FADE_MS}ms` }}
+          >
             <video
               ref={adRef}
               src={activeAd.ad.mediaUrl}
               className="w-full h-full"
               onTimeUpdate={(e) => setAdRemaining(Math.max(0, e.currentTarget.duration - e.currentTarget.currentTime))}
-              onEnded={endAd}
-              onError={endAd}
+              onEnded={() => endAd()}
+              onError={() => endAd(false)}
             >
               <track kind="captions" src={EMPTY_VTT} label="Captions" />
             </video>
@@ -134,15 +191,6 @@ export function Player({ videoUrl, vmapUrl }: Readonly<{ videoUrl: string; vmapU
             <div className="absolute top-3 right-3 rounded-full border border-white/10 bg-black/70 px-3 py-1 text-xs text-white">
               resumes at {fmtTime(activeAd.timeSec)}
             </div>
-            {(activeAd.ad.headline || activeAd.ad.tagline) && (
-              <div className="pointer-events-none absolute inset-y-0 left-0 flex w-1/2 flex-col justify-end bg-linear-to-r from-black/75 via-black/40 to-transparent p-6 sm:p-10">
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-accent-strong">{activeAd.ad.title}</p>
-                {activeAd.ad.headline && (
-                  <p className="mt-2 text-2xl font-semibold leading-tight text-white sm:text-4xl">{activeAd.ad.headline}</p>
-                )}
-                {activeAd.ad.tagline && <p className="mt-2 text-sm text-white/80 sm:text-base">{activeAd.ad.tagline}</p>}
-              </div>
-            )}
           </div>
         )}
       </div>

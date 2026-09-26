@@ -4,6 +4,7 @@ import type {
   BrandChangeResponse,
   CreateJobResponse,
   GetJobResponse,
+  ImportCatalogueResponse,
   Job,
   JobStreamEvent,
   ListBrandsResponse,
@@ -73,6 +74,10 @@ async function sendJson<T>(path: string, init: RequestInit): Promise<T> {
 
 /** Creates a brand (multipart: fields + optional ad videos). Takes up to a minute when generating creatives. */
 export const createBrand = (form: FormData) => sendJson<BrandChangeResponse>("/api/brands", { method: "POST", body: form });
+
+/** Imports a brands.json-format file (multipart: catalogue, mode, missingAds). */
+export const importCatalogue = (form: FormData) =>
+  sendJson<ImportCatalogueResponse>("/api/brands/import", { method: "POST", body: form });
 
 export const deleteBrand = (id: string) =>
   sendJson<BrandChangeResponse>(`/api/brands/${encodeURIComponent(id)}`, { method: "DELETE" });

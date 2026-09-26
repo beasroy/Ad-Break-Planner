@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { LoaderCircle, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { Clapperboard, FileJson, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { BrandSummary } from "shared";
-import { createBrand, deleteBrand, listBrands, rerunAllJobs } from "@/lib/api";
+import { createBrand, deleteBrand, importCatalogue, listBrands, rerunAllJobs } from "@/lib/api";
 
 const DURATIONS = [15, 20, 30];
+type Tab = "import" | "add";
 
 export default function BrandsPage() {
   const [brands, setBrands] = useState<BrandSummary[]>([]);
+  const [tab, setTab] = useState<Tab>("import");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"create" | "rerun" | string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
   const load = () =>
     listBrands()
@@ -25,58 +27,70 @@ export default function BrandsPage() {
   const requeuedNote = (n: number) =>
     n ? `${n} processed video${n === 1 ? "" : "s"} re-queued against the new catalogue.` : "No processed videos to re-run.";
 
-  async function onCreate(e: FormEvent<HTMLFormElement>) {
+  /** Runs a catalogue action with the shared busy/error/notice handling. */
+  async function act(key: string, fn: () => Promise<string>) {
+    setBusy(key);
+    setError(null);
+    setNotice(null);
+    try {
+      setNotice(await fn());
+      await load();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function onImport(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const data = new FormData(form);
+    if (data.get("mode") === "replace" && !confirm("Replace the whole catalogue with this file? Brands not in it are removed.")) return;
+    act("import", async () => {
+      const r = await importCatalogue(data);
+      form.reset();
+      const parts = [
+        r.added.length && `${r.added.length} added`,
+        r.updated.length && `${r.updated.length} updated`,
+        r.removed.length && `${r.removed.length} removed`,
+        r.generatedCreatives && `${r.generatedCreatives} missing ad${r.generatedCreatives === 1 ? "" : "s"} created`,
+      ].filter(Boolean);
+      return `Imported: ${parts.join(", ") || "no changes"}. ${requeuedNote(r.requeuedJobs.length)}`;
+    });
+  }
+
+  function onCreate(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;
     const data = new FormData(form);
     data.set("generate", data.get("generate") ? "true" : "false");
     data.set("durations", data.getAll("duration").join(","));
     data.delete("duration");
-    setBusy("create");
-    setError(null);
-    setNotice(null);
-    try {
+    act("create", async () => {
       const r = await createBrand(data);
       form.reset();
-      setNotice([`Created ${r.brand?.name}.`, requeuedNote(r.requeuedJobs.length), r.warning].filter(Boolean).join(" "));
-      await load();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(null);
-    }
+      return `Created ${r.brand?.name}. ${requeuedNote(r.requeuedJobs.length)}`;
+    });
   }
 
-  async function onDelete(b: BrandSummary) {
+  function onDelete(b: BrandSummary) {
     if (!confirm(`Delete ${b.name} and its ads? Every processed video will be re-run without it.`)) return;
-    setBusy(b.id);
-    setError(null);
-    setNotice(null);
-    try {
-      const r = await deleteBrand(b.id);
-      setNotice(`Deleted ${b.name}. ${requeuedNote(r.requeuedJobs.length)}`);
-      await load();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onRerun() {
-    setBusy("rerun");
-    setError(null);
-    try {
-      setNotice(requeuedNote((await rerunAllJobs()).requeuedJobs.length));
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(null);
-    }
+    act(b.id, async () => `Deleted ${b.name}. ${requeuedNote((await deleteBrand(b.id)).requeuedJobs.length)}`);
   }
 
   const input =
     "w-full rounded-xl border border-border bg-surface-elevated px-3 py-2.5 text-sm text-foreground outline-none transition placeholder:text-muted/60 focus:border-accent/60";
+  const panel = "rounded-2xl border border-border bg-surface-elevated/50 p-4 text-sm";
+  const primary =
+    "inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(215,25,32,0.3)] transition hover:bg-accent-strong disabled:opacity-40";
+  const fileInput =
+    "w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-accent file:px-3 file:py-1.5 file:font-medium file:text-white";
+
+  const tabs: { id: Tab; label: string; icon: typeof FileJson }[] = [
+    { id: "import", label: "Import JSON", icon: FileJson },
+    { id: "add", label: "Add a brand", icon: Plus },
+  ];
 
   return (
     <div className="space-y-8">
@@ -85,96 +99,137 @@ export default function BrandsPage() {
           <p className="text-xs uppercase tracking-[0.24em] text-accent-strong">Catalogue</p>
           <h1 className="text-3xl font-semibold tracking-tight">Brands</h1>
           <p className="max-w-2xl text-sm leading-6 text-muted">
-            Every video is matched against these brands at runtime. Adding or deleting a brand re-runs all processed videos, so
-            no break is ever chosen with an outdated catalogue.
+            Every video is matched against these brands at runtime. Any change re-runs all processed videos, so no break is ever
+            chosen with an outdated catalogue.
           </p>
         </div>
-        <button
-          onClick={onRerun}
-          disabled={busy !== null}
-          className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-elevated px-4 py-2.5 text-sm font-medium transition hover:border-accent/40 disabled:opacity-40"
-        >
-          <RefreshCw className={`h-4 w-4 ${busy === "rerun" ? "animate-spin" : ""}`} />
-          Re-run all videos
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => act("rerun", async () => requeuedNote((await rerunAllJobs()).requeuedJobs.length))}
+            disabled={busy !== null}
+            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface-elevated px-4 py-2.5 text-sm font-medium transition hover:border-accent/40 disabled:opacity-40"
+          >
+            <RefreshCw className={`h-4 w-4 ${busy === "rerun" ? "animate-spin" : ""}`} />
+            Re-run all videos
+          </button>
+        </div>
       </div>
 
       {error && <p className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-3 text-sm text-accent-strong">{error}</p>}
       {notice && <p className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">{notice}</p>}
 
-      <form
-        onSubmit={onCreate}
-        className="space-y-5 rounded-3xl border border-border bg-surface/95 p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_64px_rgba(0,0,0,0.45)]"
-      >
-        <div>
-          <h2 className="text-lg font-semibold">Add a brand</h2>
-          <p className="text-xs text-muted">Synthetic names only; names that look like real companies are refused.</p>
-        </div>
-        <div className="grid gap-4 md:grid-cols-2">
-          <label className="space-y-1.5 text-sm">
-            <span className="text-muted">Name</span>
-            <input name="name" required minLength={2} maxLength={60} placeholder="Synth Ninth Paints" className={input} />
-          </label>
-          <label className="space-y-1.5 text-sm">
-            <span className="text-muted">Category</span>
-            <input name="category" placeholder="home/paint/renovation" className={input} />
-          </label>
-          <label className="space-y-1.5 text-sm">
-            <span className="text-muted">Target contexts: scenes the brand fits (comma separated)</span>
-            <textarea name="targetContexts" required rows={2} placeholder="painting walls, new house, renovation" className={input} />
-          </label>
-          <label className="space-y-1.5 text-sm">
-            <span className="text-muted">Negative contexts: never place next to (comma separated)</span>
-            <textarea name="negativeContexts" rows={2} placeholder="flood, fire, grief" className={input} />
-          </label>
+      <section className="overflow-hidden rounded-3xl border border-border bg-surface/95 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_64px_rgba(0,0,0,0.45)]">
+        <div role="tablist" aria-label="Change the catalogue" className="flex gap-1 border-b border-border px-4 pt-4">
+          {tabs.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={tab === id}
+              onClick={() => setTab(id)}
+              className={`-mb-px inline-flex items-center gap-2 rounded-t-xl border px-4 py-2.5 text-sm font-medium transition ${
+                tab === id
+                  ? "border-border border-b-transparent bg-surface text-foreground"
+                  : "border-transparent text-muted hover:text-foreground"
+              }`}
+            >
+              <Icon className={`h-4 w-4 ${tab === id ? "text-accent-strong" : ""}`} />
+              {label}
+            </button>
+          ))}
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2 rounded-2xl border border-border bg-surface-elevated/50 p-4 text-sm">
-            <label className="flex items-center gap-2 font-medium">
-              <input type="checkbox" name="generate" defaultChecked className="accent-[var(--accent)]" />
-              <Sparkles className="h-4 w-4 text-accent-strong" />
-              Generate ads with AI
-            </label>
-            <p className="text-xs text-muted">An image of the brand&apos;s world plus a headline and tagline shown over it.</p>
-            <div className="flex flex-wrap items-center gap-3 pt-1">
-              {DURATIONS.map((d) => (
-                <label key={d} className="flex items-center gap-1.5 font-mono text-xs">
-                  <input type="checkbox" name="duration" value={d} defaultChecked={d !== 20} className="accent-[var(--accent)]" />
-                  {d}s
+        {tab === "import" ? (
+          <form role="tabpanel" onSubmit={onImport} className="space-y-4 p-6">
+            <p className="text-sm text-muted">
+              Upload a catalogue in the brands.json format: an array of brands, or {"{ \"brands\": [...] }"}. It is validated before
+              anything is saved, and new brand names are checked to be synthetic. Any ad file the JSON points to that does not exist
+              gets a title-card ad.
+            </p>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className={`space-y-2 ${panel}`}>
+                <span className="font-medium">Catalogue file</span>
+                <input type="file" name="catalogue" accept="application/json,.json" required className={fileInput} />
+              </label>
+              <fieldset className={`space-y-2 ${panel}`}>
+                <legend className="sr-only">Import mode</legend>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="mode" value="merge" defaultChecked className="accent-accent" />
+                  Add or update these brands
                 </label>
-              ))}
-              <select name="language" defaultValue="bn" className="ml-auto rounded-lg border border-border bg-surface px-2 py-1 text-xs">
-                <option value="bn">Bengali copy</option>
-                <option value="en">English copy</option>
-              </select>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="mode" value="replace" className="accent-accent" />
+                  Replace the whole catalogue
+                </label>
+              </fieldset>
             </div>
-          </div>
-          <label className="space-y-2 rounded-2xl border border-border bg-surface-elevated/50 p-4 text-sm">
-            <span className="font-medium">Or upload ad videos (up to 3)</span>
-            <input
-              type="file"
-              name="creatives"
-              accept="video/*"
-              multiple
-              className="w-full text-xs text-muted file:mr-3 file:rounded-lg file:border-0 file:bg-accent file:px-3 file:py-1.5 file:font-medium file:text-white"
-            />
-            <p className="text-xs text-muted">3–120 s each; converted to 1280×720 mp4. Length is read from the file.</p>
-          </label>
-        </div>
+            <div className="flex items-center gap-3">
+              <button type="submit" disabled={busy !== null} className={primary}>
+                {busy === "import" && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                {busy === "import" ? "Importing…" : "Import"}
+              </button>
+              {busy === "import" && <span className="text-xs text-muted">Creating missing ads takes a few seconds each.</span>}
+            </div>
+          </form>
+        ) : (
+          <form role="tabpanel" onSubmit={onCreate} className="space-y-5 p-6">
+            <p className="text-xs text-muted">Synthetic names only; names that look like real companies are refused.</p>
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-1.5 text-sm">
+                <span className="text-muted">Name</span>
+                <input name="name" required minLength={2} maxLength={60} placeholder="Synth Ninth Paints" className={input} />
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="text-muted">Category</span>
+                <input name="category" placeholder="home/paint/renovation" className={input} />
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="text-muted">Target contexts: scenes the brand fits (comma separated)</span>
+                <textarea name="targetContexts" required rows={2} placeholder="painting walls, new house, renovation" className={input} />
+              </label>
+              <label className="space-y-1.5 text-sm">
+                <span className="text-muted">Negative contexts: never place next to (comma separated)</span>
+                <textarea name="negativeContexts" rows={2} placeholder="flood, fire, grief" className={input} />
+              </label>
+            </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            type="submit"
-            disabled={busy !== null}
-            className="inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(215,25,32,0.3)] transition hover:bg-accent-strong disabled:opacity-40"
-          >
-            {busy === "create" && <LoaderCircle className="h-4 w-4 animate-spin" />}
-            {busy === "create" ? "Creating…" : "Create brand"}
-          </button>
-          {busy === "create" && <span className="text-xs text-muted">Checking the name, generating the ad and copy: up to a minute.</span>}
-        </div>
-      </form>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className={`space-y-2 ${panel}`}>
+                <label className="flex items-center gap-2 font-medium">
+                  <input type="checkbox" name="generate" defaultChecked className="accent-accent" />
+                  <Clapperboard className="h-4 w-4 text-accent-strong" />
+                  Create title-card ads
+                </label>
+                <p className="text-xs text-muted">The brand name, category and target contexts on the video.</p>
+                <div className="flex flex-wrap items-center gap-3 pt-1">
+                  {DURATIONS.map((d) => (
+                    <label key={d} className="flex items-center gap-1.5 font-mono text-xs">
+                      <input type="checkbox" name="duration" value={d} defaultChecked={d !== 20} className="accent-accent" />
+                      {d}s
+                    </label>
+                  ))}
+                  <select name="language" defaultValue="bn" aria-label="Ad language" className="ml-auto rounded-lg border border-border bg-surface px-2 py-1 text-xs">
+                    <option value="bn">Bengali audience</option>
+                    <option value="en">English audience</option>
+                  </select>
+                </div>
+              </div>
+              <label className={`space-y-2 ${panel}`}>
+                <span className="font-medium">Or upload ad videos (up to 3)</span>
+                <input type="file" name="creatives" accept="video/*" multiple className={fileInput} />
+                <p className="text-xs text-muted">3–120 s each; converted to 1280×720 mp4. Length is read from the file.</p>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button type="submit" disabled={busy !== null} className={primary}>
+                {busy === "create" && <LoaderCircle className="h-4 w-4 animate-spin" />}
+                {busy === "create" ? "Creating…" : "Create brand"}
+              </button>
+              {busy === "create" && <span className="text-xs text-muted">Checking the name and creating the ads.</span>}
+            </div>
+          </form>
+        )}
+      </section>
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
@@ -201,12 +256,6 @@ export default function BrandsPage() {
                   {busy === b.id ? <LoaderCircle className="h-4 w-4 animate-spin text-accent-strong" /> : <Trash2 className="h-4 w-4" />}
                 </button>
               </div>
-              {(b.headline || b.tagline) && (
-                <div className="rounded-xl border border-border bg-surface-elevated/60 px-3 py-2">
-                  {b.headline && <p className="text-sm font-semibold">{b.headline}</p>}
-                  {b.tagline && <p className="text-xs text-muted">{b.tagline}</p>}
-                </div>
-              )}
               <div className="flex flex-wrap gap-1.5">
                 {b.targetContexts.map((c) => (
                   <span key={c} className="rounded-full border border-border bg-surface-elevated px-2 py-0.5 text-xs text-muted">

@@ -282,3 +282,26 @@ describe("repo: change notifications (live updates)", () => {
     expect(seen).toEqual([[ID], [ID], [ID], [ID], [ID]]);
   });
 });
+
+describe("queue: catalogue changed during processing", () => {
+  it("re-queues a job that finished with an outdated catalogue", async () => {
+    const { repo } = setup();
+    upload(repo);
+    let catalogue = "cat1";
+    const run: RunFn = async () => {
+      const used = catalogue;
+      catalogue = "cat2"; // someone imports a new catalogue mid-run
+      return { durationSec: 1, breakCount: 1, catalogueHash: used };
+    };
+    const q = createQueue({ repo, run, config: Q, workerId: "w1", currentCatalogueHash: () => catalogue });
+    q.start();
+    await q.tick();
+    await q.idle();
+    expect(repo.getJob(ID)!.status).toBe("queued");
+    expect(repo.getAudit(ID)!.events.at(-1)).toMatchObject({ type: "job.requeued", detail: { reason: "catalogue changed during processing" } });
+    await q.tick();
+    await q.idle();
+    q.stop();
+    expect(repo.getJob(ID)).toMatchObject({ status: "done", catalogueHash: "cat2" });
+  });
+});

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { config } from "../src/config";
-import { loadCatalogue, parseCatalogue } from "../src/catalogue/loader";
+import { loadCatalogueFile, parseCatalogue } from "../src/catalogue/loader";
 
 const brand = (id: string, negative: string[]) => ({
   brand_id: id,
@@ -13,7 +13,7 @@ const brand = (id: string, negative: string[]) => ({
 
 describe("catalogue loader", () => {
   it("loads the organiser catalogue and builds the negative vocab at runtime", async () => {
-    const cat = await loadCatalogue(config.cataloguePath);
+    const cat = await loadCatalogueFile(config.cataloguePath);
     expect(cat.brands).toHaveLength(8);
     expect(cat.negativeVocab).toEqual([...new Set(cat.brands.flatMap((b) => b.negativeContexts))].sort());
     expect(cat.brands[0].creatives.length).toBeGreaterThan(0);

@@ -4,14 +4,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "../src/config";
-import { loadCatalogue } from "../src/catalogue/loader";
+import { openCatalogue } from "../src/catalogue/store";
 import { run } from "../src/lib/ffmpeg";
 import { transcribeDeepgram } from "../src/lib/deepgram";
 import { chatJson } from "../src/lib/openrouter";
 
 const scratch = path.join(config.dataDir, "_smoke");
 await fs.mkdir(scratch, { recursive: true });
-const catalogue = await loadCatalogue(config.cataloguePath);
+const catalogue = await openCatalogue();
 const input = process.argv[2] ?? catalogue.brands[0].creatives[0].file;
 
 // 1. Deepgram: 60s of mono 16k mp3.

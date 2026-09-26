@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Candidate, IngestArtifact, MatchedCandidate, Scene, Signals, Transcript } from "shared";
 import { config } from "../src/config";
-import { loadCatalogue } from "../src/catalogue/loader";
+import { openCatalogue } from "../src/catalogue/store";
 import { ARTIFACTS, exists, readJson, writeJson } from "../src/lib/artifacts";
 import { hashFile } from "../src/lib/hash";
 import { findSourceVideo, runPipeline } from "../src/jobs/runner";
@@ -43,7 +43,7 @@ if (!stage || !hash) {
 }
 const dir = path.join(config.dataDir, hash);
 const videoPath = (await findSourceVideo(dir))!;
-const catalogue = await loadCatalogue(config.cataloguePath);
+const catalogue = await openCatalogue();
 const ctx = makeContext({ jobId: hash.slice(0, 16), dir, videoPath, catalogue, force });
 const need = async <T>(name: string): Promise<T> => {
   const p = path.join(dir, name);
