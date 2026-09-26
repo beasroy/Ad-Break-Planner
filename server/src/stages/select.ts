@@ -29,7 +29,7 @@ export interface SelectInputs {
 }
 
 /** Bump when selection logic changes so cached selections are recomputed. */
-const SELECT_VERSION = 3;
+const SELECT_VERSION = 4;
 
 /** Safety valve for pathological inputs; real episodes explore a few thousand schedules at most. */
 const MAX_SEARCH_NODES = 500_000;
@@ -141,7 +141,9 @@ export function selectBreaks(inp: SelectInputs): { breaks: Break[]; log: Selecti
       whereScore: s.c.where!.total,
       fit: s.fit,
       combinedScore: combined(s.c, s.fit),
-      reason: s.swappedFrom ? `${s.reason} (took this over top brand ${s.swappedFrom} to avoid back-to-back repeats)` : s.reason,
+      reason: s.swappedFrom
+        ? `${s.reason} (took this over top brand ${brandById.get(s.swappedFrom)?.name ?? s.swappedFrom} to avoid back-to-back repeats)`
+        : s.reason,
     };
   });
   for (const b of breaks) log.set(b.candidateId, { candidateId: b.candidateId, outcome: "selected", reason: b.reason });

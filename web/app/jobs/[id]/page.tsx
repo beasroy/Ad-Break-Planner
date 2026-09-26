@@ -124,8 +124,8 @@ export default function JobPage() {
                 <tbody className="divide-y divide-black/10 dark:divide-white/10">
                   {results.breaks.map((b) => (
                     <tr key={b.candidateId} className="align-top">
-                      <td className="px-3 py-2 font-mono">{fmtTime(b.timeSec)}</td>
-                      <td className="px-3 py-2">{b.brandName}</td>
+                      <td className="px-3 py-2 font-mono whitespace-nowrap">{fmtTime(b.timeSec)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{b.brandName}</td>
                       <td className="px-3 py-2 font-mono">{b.adDurationSec}s</td>
                       <td className="px-3 py-2 font-mono">{b.whereScore.toFixed(2)}</td>
                       <td className="px-3 py-2 font-mono">{b.fit.toFixed(2)}</td>

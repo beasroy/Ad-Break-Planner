@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Job, StageName } from "shared";
 import { config } from "../config";
 import { loadCatalogue } from "../catalogue/loader";
-import { ARTIFACTS, exists } from "../lib/artifacts";
+import { ARTIFACTS } from "../lib/artifacts";
 import { makeContext, type StageContext } from "../stages/context";
 import { runCandidates } from "../stages/candidates";
 import { runIngest } from "../stages/ingest";
@@ -32,19 +32,27 @@ export async function runPipeline(job: Job, opts: { force?: boolean } = {}): Pro
   job.error = undefined;
 
   const dir = jobDir(job.fileHash);
+  // A stage counts as "cached" when its artifact existed beforehand and was not rewritten.
   const artifactFor: Partial<Record<StageName, string>> = {
     ingest: ARTIFACTS.ingest,
     signals: ARTIFACTS.signals,
-    transcribe: ARTIFACTS.transcript,
+    scenes: ARTIFACTS.scenes,
+    candidates: ARTIFACTS.candidates,
+    match: ARTIFACTS.matches,
+    select: ARTIFACTS.breaks,
+  };
+  const mtime = async (name: StageName) => {
+    const art = artifactFor[name];
+    return art ? (await fs.stat(path.join(dir, art)).catch(() => undefined))?.mtimeMs : undefined;
   };
 
   async function stage<T>(name: StageName, fn: () => Promise<T>): Promise<T> {
-    const art = artifactFor[name];
-    const wasCached = !opts.force && art ? await exists(path.join(dir, art)) : false;
+    const before = await mtime(name);
     setStage(job, name, { state: "running", startedAt: new Date().toISOString(), note: undefined });
     try {
       const r = await fn();
-      setStage(job, name, { state: wasCached ? "cached" : "done", finishedAt: new Date().toISOString() });
+      const cached = before !== undefined && before === (await mtime(name));
+      setStage(job, name, { state: cached ? "cached" : "done", finishedAt: new Date().toISOString() });
       return r;
     } catch (err) {
       setStage(job, name, { state: "error", finishedAt: new Date().toISOString(), note: (err as Error).message });
