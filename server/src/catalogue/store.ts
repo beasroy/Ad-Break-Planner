@@ -1,6 +1,6 @@
-// The brand catalogue lives in the database. catalogue/brands.json only seeds an empty database
-// (fresh install, wiped data/) and is the import/export format. Every write is validated with
-// the same parser as the JSON file, then saved in one transaction and audited.
+// The brand catalogue lives in the database. catalogue/brands.json is the import/export format.
+// Every write is validated with the same parser as the JSON file, then saved in one transaction
+// and audited.
 import fs from "node:fs";
 import path from "node:path";
 import type { Catalogue, Job } from "shared";
@@ -12,10 +12,9 @@ import { loadCatalogueFile, parseCatalogue, parseRawCatalogue, type RawBrandData
 /** Creative `url`s in the catalogue are relative to this folder (catalogue/ by default). */
 export const catalogueDir = () => path.dirname(config.cataloguePath);
 
-/** For scripts: opens the database (seeding the catalogue if empty) and returns the live catalogue. */
+/** For scripts: opens the database and returns the live catalogue. */
 export async function openCatalogue(): Promise<Catalogue> {
   if (!maybeRepo()) initDb(config.dbPath);
-  await seedCatalogueIfEmpty();
   return loadCatalogue();
 }
 
@@ -29,7 +28,6 @@ export const brandIds = () => new Set(getRepo().listBrandsRaw().map((b) => b.bra
 
 /** Validates and saves the full catalogue. Throws (saving nothing) if the result is invalid. */
 function commit(next: RawBrandData[], source: BrandSource) {
-  if (!next.length) throw new Error("the catalogue needs at least one brand");
   for (const b of next) for (const c of b.creatives) assertSafeUrl(c.url);
   parseCatalogue(next, catalogueDir());
   getRepo().replaceCatalogue(next, source);

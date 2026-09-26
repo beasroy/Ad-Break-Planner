@@ -145,8 +145,7 @@ brandsRouter.delete("/api/brands/:id", async (req, res, next) => {
     const requeuedJobs = rerunAllJobs(`brand removed: ${req.params.id}`, requester(req));
     res.json({ requeuedJobs } satisfies BrandChangeResponse);
   } catch (err) {
-    if (err instanceof Error && /at least one brand/.test(err.message)) res.status(409).json({ error: err.message });
-    else next(err);
+    next(err);
   }
 });
 

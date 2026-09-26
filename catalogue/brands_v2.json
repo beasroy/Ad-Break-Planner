@@ -1,7 +1,7 @@
 [
   {
     "brand_id": "sonar_cha",
-    "display_name": "Sipora Tea",
+    "display_name": "Brand A",
     "category": "beverages/tea",
     "target_contexts": [
       "morning routine",
@@ -48,7 +48,7 @@
   },
   {
     "brand_id": "mishti_bite",
-    "display_name": "Nibzy Bites",
+    "display_name": "Brand B",
     "category": "food/snacks/biscuits",
     "target_contexts": [
       "snacking",
@@ -95,7 +95,7 @@
   },
   {
     "brand_id": "ujjwal_glow",
-    "display_name": "Lumiva Glow",
+    "display_name": "Brand C",
     "category": "personal care/skincare",
     "target_contexts": [
       "getting ready",
@@ -142,7 +142,7 @@
   },
   {
     "brand_id": "adda_data",
-    "display_name": "Pinglo Data",
+    "display_name": "Brand D",
     "category": "telecom/connectivity",
     "target_contexts": [
       "phone",
@@ -182,7 +182,7 @@
   },
   {
     "brand_id": "cholun_pay",
-    "display_name": "Paylio",
+    "display_name": "Brand E",
     "category": "fintech/digital payments",
     "target_contexts": [
       "shopping",
@@ -228,7 +228,7 @@
   },
   {
     "brand_id": "pothik_rides",
-    "display_name": "Zoomli Rides",
+    "display_name": "Brand F",
     "category": "automotive/mobility",
     "target_contexts": [
       "car",
@@ -269,7 +269,7 @@
   },
   {
     "brand_id": "nodi_stays",
-    "display_name": "Stayza",
+    "display_name": "Brand G",
     "category": "travel/hospitality",
     "target_contexts": [
       "travel",
@@ -310,7 +310,7 @@
   },
   {
     "brand_id": "haat_bazaar",
-    "display_name": "Cartlio",
+    "display_name": "Brand H",
     "category": "e-commerce/online shopping",
     "target_contexts": [
       "online shopping",

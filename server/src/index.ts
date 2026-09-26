@@ -4,7 +4,7 @@ import express, { type ErrorRequestHandler } from "express";
 import cors from "cors";
 import { config } from "./config";
 import { assertFfmpegAvailable } from "./lib/ffmpeg";
-import { currentCatalogueHash, loadCatalogue, seedCatalogueIfEmpty } from "./catalogue/store";
+import { currentCatalogueHash, loadCatalogue } from "./catalogue/store";
 import { initDb } from "./db";
 import { createQueue } from "./jobs/queue";
 import { runPipeline } from "./jobs/runner";
@@ -19,8 +19,6 @@ async function main() {
   await fs.mkdir(config.dataDir, { recursive: true });
   const repo = initDb(config.dbPath);
   console.log(`Database: ${config.dbPath}`);
-  const seeded = await seedCatalogueIfEmpty();
-  if (seeded) console.log(`Catalogue seeded from ${config.cataloguePath}: ${seeded} brands`);
   const catalogue = await loadCatalogue();
   console.log(`Catalogue: ${catalogue.brands.length} brands, ${catalogue.negativeVocab.length} negative contexts`);
   await importLegacyJobs();

@@ -78,9 +78,10 @@ describe("editing", () => {
     expect(exportCatalogue()).toEqual(before);
   });
 
-  it("never removes the last brand", () => {
+  it("allows removing the last brand", () => {
     for (const b of exportCatalogue().slice(1)) removeBrand(b.brand_id);
-    expect(() => removeBrand(exportCatalogue()[0].brand_id)).toThrow(/at least one brand/);
+    expect(removeBrand(exportCatalogue()[0].brand_id)).toBe(true);
+    expect(exportCatalogue()).toEqual([]);
   });
 });
 
@@ -101,6 +102,13 @@ describe("import", () => {
     applyImport(plan, "replace");
     expect(exportCatalogue().map((b) => b.brand_id)).toEqual(["brand_x", "brand_y"]);
     expect(getRepo().listCatalogueEvents()[0]).toMatchObject({ type: "catalogue.imported", detail: { mode: "replace" } });
+  });
+
+  it("replace accepts an empty catalogue", () => {
+    const plan = planImport({ brands: [] }, "replace");
+    expect(plan.added).toEqual([]);
+    applyImport(plan, "replace");
+    expect(exportCatalogue()).toEqual([]);
   });
 
   it("rejects invalid files, duplicates and creative paths outside the catalogue folder", () => {
