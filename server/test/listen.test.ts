@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { config } from "../src/config";
 import { vadAround, windowScore } from "../src/lib/vad";
-import { answerHasSpeech, deepgramWordNear, llmVerdict, vadGate } from "../src/stages/match/listen";
+import { answerHasSpeech, speechIntervalNear, llmVerdict, vadGate } from "../src/stages/match/listen";
 
 const T = { windowSec: 1, vadSpeechMin: 0.9, vadQuietMax: 0.1 };
 const quiet = { speech_near_mark: false, heard_at_mark: "music", transcript: "" };
@@ -44,11 +44,11 @@ describe("llmVerdict", () => {
   });
 });
 
-describe("deepgramWordNear", () => {
+describe("speechIntervalNear", () => {
   it("finds a word overlapping ±1s of the cut", () => {
-    expect(deepgramWordNear([{ start: 10.5, end: 10.9 }], 10, 1)).toBe(true);
-    expect(deepgramWordNear([{ start: 8.2, end: 9.1 }], 10, 1)).toBe(true);
-    expect(deepgramWordNear([{ start: 11.2, end: 11.5 }], 10, 1)).toBe(false);
+    expect(speechIntervalNear([{ start: 10.5, end: 10.9 }], 10, 1)).toBe(true);
+    expect(speechIntervalNear([{ start: 8.2, end: 9.1 }], 10, 1)).toBe(true);
+    expect(speechIntervalNear([{ start: 11.2, end: 11.5 }], 10, 1)).toBe(false);
   });
 });
 

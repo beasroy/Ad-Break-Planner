@@ -8,6 +8,7 @@ import type {
   ImportProgress,
   ImportStartedResponse,
   Job,
+  JobAuditResponse,
   JobStreamEvent,
   ListBrandsResponse,
   ListJobsResponse,
@@ -23,6 +24,10 @@ async function getJson<T>(path: string): Promise<T> {
 
 export const listJobs = () => getJson<ListJobsResponse>("/api/jobs");
 export const getJob = (id: string) => getJson<GetJobResponse>(`/api/jobs/${encodeURIComponent(id)}`);
+
+/** Every API call this job made: cost and count by provider/model, by pipeline stage, and by what
+ *  the call was for (e.g. "placement chunk N"). */
+export const getJobAudit = (id: string) => getJson<JobAuditResponse>(`/api/jobs/${encodeURIComponent(id)}/audit`);
 
 /**
  * Live job updates over Server-Sent Events. The browser reconnects by itself after a drop, and

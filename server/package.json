@@ -9,6 +9,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "stage": "tsx scripts/stage.ts",
     "placement": "tsx --disable-warning=ExperimentalWarning scripts/placement.ts",
+    "transcribe-playground": "tsx --disable-warning=ExperimentalWarning scripts/transcribe-playground.ts",
     "creatives": "tsx --disable-warning=ExperimentalWarning scripts/make-creatives.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

@@ -1,14 +1,19 @@
 // LLM ad placement (config.placement.mode = "llm"). One LLM call per transcription chunk (the audio
 // pieces from ingest) reads that chunk's dialogue, with the measured silences and shot cuts written
-// in, and picks the line after which an ad plays and the brand. The model only makes the judgement
-// call. Code decides where exactly the cut goes and enforces every safety rule (minimum gap, no ads in
-// the last minutes, ad load, negative contexts, speech at the cut, previous brand); a pick that
-// fails falls back to the model's alternatives, and if none pass the chunk stays empty.
+// in, and picks the line after which an ad plays and the brand. Every chunk is called independently
+// and in parallel: none is told what any other chunk decided, so the model only ever judges one
+// stretch on its own merits. Code decides where exactly each pick's cut goes, rejects anything unsafe
+// or below a strict fit floor (no-ad zone, negative contexts, fit < placement.minBrandFit), then —
+// once every chunk has answered — chooses the best combination across all of them: highest total
+// quality subject to the ad-load budget and never repeating a brand back to back (see
+// scheduleBreaks). There is no minimum gap between ads: the fit floor alone gates what plays. A cut
+// that then fails the speech check is dropped and the schedule is redrawn without it.
+import type { Brand, Break, Catalogue, Creative, IngestArtifact, Interval, MatchedCandidate, ProgrammeContext, ScoreWeights, Segment, SelectionLog, Signals, Transcript } from "shared";
 import fs from "node:fs/promises";
-import type { Brand, Break, Catalogue, IngestArtifact, Interval, MatchedCandidate, ProgrammeContext, Segment, SelectionLog, Signals, Transcript } from "shared";
 import { ARTIFACTS, readKeyed, writeKeyed } from "../lib/artifacts";
 import { hashJson } from "../lib/hash";
 import { chatJson } from "../lib/openrouter";
+import { mapLimit } from "../lib/pool";
 import {
   PLACEMENT_PROMPT_VERSION,
   PlacementResponse,
@@ -21,10 +26,18 @@ import {
 import { ProgrammeResponse, STORY_PROMPT_VERSION, programmeJsonSchema, storySystemPrompt, storyUserPrompt } from "../prompts/programme";
 import { artifactPath, type StageContext } from "./context";
 import { listenCheck } from "./match";
-import { pickCreative } from "./select";
+import { pickCreative, shortestCreative } from "./select";
 
-/** Bump when the chunk, cut or check logic below changes, so cached placements are recomputed. */
-export const PLACEMENT_LOGIC_VERSION = 10;
+/** Bump when the chunk, cut, scheduling or check logic below changes, so cached placements are recomputed. */
+export const PLACEMENT_LOGIC_VERSION = 14;
+
+/** Safety valve for pathological inputs; real episodes explore a few thousand schedules at most (see select.ts). */
+const MAX_SEARCH_NODES = 500_000;
+
+/** Bounded re-scheduling: a chosen cut can fail the speech check, which drops it and reschedules
+ *  around the rest. Each iteration only re-checks cuts not yet verified, so cost stays close to one
+ *  listen check per finally-accepted ad; this just caps the pathological case. */
+const MAX_RESCHEDULE_ROUNDS = 20;
 
 /** Tolerance for "at least N seconds" on times that are sums of floats (1.5 s must not come out as 1.4999…). */
 const EPS = 1e-6;
@@ -122,17 +135,19 @@ export function freeIntervals(span: Interval, words: Interval[], pad: number): I
 }
 
 /**
- * Pure: the safety rules code enforces on one option from the model. Empty = passes.
- * Relies on the contexts the model reported as nearby (there is no separate scene analysis).
+ * Pure: the content safety rules code enforces on one option from the model, independent of any
+ * other option or chunk. Empty = passes. Relies on the contexts the model reported as nearby
+ * (there is no separate scene analysis). Not repeating a brand back to back is a separate, later
+ * check (see scheduleBreaks): it depends on which chunks end up adjacent in the final schedule,
+ * which isn't known until every chunk has answered.
  */
 export function checkOption(
   o: { brandId: string; fit: number },
-  d: { brands: Brand[]; previousBrand?: string; blockAll: string[]; contextsNearby: string[]; minBrandFit: number },
+  d: { brands: Brand[]; blockAll: string[]; contextsNearby: string[]; minBrandFit: number },
 ): string[] {
   const problems: string[] = [];
   const brand = d.brands.find((b) => b.id === o.brandId);
   if (!brand) return [`unknown brand ${o.brandId}`];
-  if (o.brandId === d.previousBrand) problems.push("same brand as the previous break");
   const reported = new Set(d.contextsNearby.map((c) => c.trim().toLowerCase()));
   const own = brand.negativeContexts.filter((c) => reported.has(c));
   if (own.length) problems.push(`model reported ${own.join(", ")} nearby, which ${brand.name} must never be next to`);
@@ -200,6 +215,142 @@ const toPlacementBrand = (b: Brand): PlacementBrand => ({
 const blockAllContexts = (c: Catalogue, share: number) =>
   c.negativeVocab.filter((ctx) => c.brands.filter((b) => b.negativeContexts.includes(ctx)).length / c.brands.length > share);
 
+/** One (line, brand) choice from one chunk that passed every content check on its own — a schedulable option. */
+export interface ScheduleItem {
+  chunk: number;
+  lineId: number;
+  brandId: string;
+  fit: number;
+  reason: string;
+  cutTime: number;
+  basis: "silence" | "speechFree";
+  pauseSec: number;
+}
+
+export interface ScheduledPick {
+  item: ScheduleItem;
+  creative: Creative;
+  combinedScore: number;
+}
+
+export interface ScheduleInputs {
+  /** Every chunk's viable items, in chunk (= time) order; a chunk with none is an empty array. Within
+   *  a chunk, best first — ties among a chunk's own items always favour the earlier one. */
+  itemsByChunk: ScheduleItem[][];
+  brands: Brand[];
+  durationSec: number;
+  maxAdLoadPct: number;
+  weights: ScoreWeights["combined"];
+  language: string;
+  /** Subtracted from an item's score for every earlier use of the same brand in this schedule — a
+   *  tie-break, not a ban: a repeat still wins when it is clearly the better fit. */
+  repeatPenalty: number;
+  /** Hard cap: a brand already used this many times cannot be picked again, whatever it scores. */
+  maxBrandRepeats: number;
+}
+
+/** Pure: `fit` and pause length combined the same way the rules pipeline scores a break. */
+export const combinedScore = (item: Pick<ScheduleItem, "fit" | "pauseSec">, weights: ScoreWeights["combined"]) =>
+  Math.min(1, item.pauseSec / 3) * weights.where + item.fit * weights.brandFit;
+
+/**
+ * How many times one brand may air in an episode: 2 for anything up to about 75 minutes, 3 beyond
+ * that. Kept separate from the per-pick repeatPenalty, which discourages a repeat before this stops
+ * it outright — with a small catalogue, some repetition is unavoidable, so this only bounds it.
+ */
+export const maxBrandRepeats = (durationSec: number): number => Math.min(3, Math.max(2, Math.round(durationSec / 1800)));
+
+/**
+ * Picks the highest-total-quality combination of at most one item per chunk, subject to: the
+ * ad-load budget, never the same brand as the adjacent pick, and the repeat cap — with a score
+ * penalty pushing a fresh brand ahead of a repeat before the cap forces it. There is no minimum gap
+ * between ads and no target ad count: every item that has already cleared the fit floor (0.7 by
+ * default; see checkOption) and every other content check is free to be scheduled as close to
+ * another as the content allows, and there is no preference for more ads over fewer either — the
+ * fit floor alone decides which ads exist to choose from. Exhaustive search over chunks in order
+ * (small n; see MAX_SEARCH_NODES).
+ */
+export function scheduleBreaks(inp: ScheduleInputs): { picks: ScheduledPick[]; reasonUnpicked: (item: ScheduleItem) => string } {
+  const brandById = new Map(inp.brands.map((b) => [b.id, b]));
+  const score = (item: ScheduleItem) => combinedScore(item, inp.weights);
+  const maxAdSec = inp.maxAdLoadPct * inp.durationSec;
+  const groups = inp.itemsByChunk.filter((g) => g.length > 0);
+
+  type Sel = { item: ScheduleItem; creative: Creative };
+  let best: Sel[] = [];
+  let bestScore = -1;
+  let nodes = 0;
+  const path: Sel[] = [];
+  const brandCounts = new Map<string, number>();
+  const dfs = (gi: number, adUsed: number, total: number) => {
+    if (++nodes > MAX_SEARCH_NODES) return;
+    if (total > bestScore) {
+      best = [...path];
+      bestScore = total;
+    }
+    if (gi >= groups.length) return;
+    dfs(gi + 1, adUsed, total); // skip this chunk entirely
+    const last = path.at(-1);
+    for (const item of groups[gi]) {
+      if (last && item.brandId === last.item.brandId) continue;
+      const priorUses = brandCounts.get(item.brandId) ?? 0;
+      if (priorUses >= inp.maxBrandRepeats) continue;
+      const brand = brandById.get(item.brandId);
+      const creative = brand && shortestCreative(brand, inp.language);
+      if (!creative || creative.durationSec > maxAdSec - adUsed + 1e-9) continue;
+      path.push({ item, creative });
+      brandCounts.set(item.brandId, priorUses + 1);
+      dfs(gi + 1, adUsed + creative.durationSec, total + score(item) - (priorUses > 0 ? inp.repeatPenalty : 0));
+      brandCounts.set(item.brandId, priorUses);
+      path.pop();
+    }
+  };
+  dfs(0, 0, 0);
+
+  // Spend the remaining ad-load budget: upgrade to longer creatives, best-scoring picks first.
+  let used = best.reduce((t, s) => t + s.creative.durationSec, 0);
+  for (const s of [...best].sort((a, b) => score(b.item) - score(a.item))) {
+    const brand = brandById.get(s.item.brandId)!;
+    const up = pickCreative(brand, maxAdSec - used + s.creative.durationSec, inp.language);
+    if (up && up.durationSec > s.creative.durationSec) {
+      used += up.durationSec - s.creative.durationSec;
+      s.creative = up;
+    }
+  }
+
+  // Recompute each pick's own repeat penalty in time order, for a combinedScore that shows what it
+  // actually scored (this matches the order the search's own penalty was applied in).
+  const finalCounts = new Map<string, number>();
+  const picks: ScheduledPick[] = best
+    .sort((a, b) => a.item.cutTime - b.item.cutTime)
+    .map((s) => {
+      const priorUses = finalCounts.get(s.item.brandId) ?? 0;
+      finalCounts.set(s.item.brandId, priorUses + 1);
+      return { item: s.item, creative: s.creative, combinedScore: score(s.item) - (priorUses > 0 ? inp.repeatPenalty : 0) };
+    });
+
+  // Explain any viable item that did not make the schedule.
+  const reasonUnpicked = (item: ScheduleItem): string => {
+    const before = [...picks].reverse().find((p) => p.item.cutTime < item.cutTime);
+    const after = picks.find((p) => p.item.cutTime > item.cutTime);
+    if (before?.item.brandId === item.brandId || after?.item.brandId === item.brandId) {
+      return "same brand as the adjacent accepted break, and a higher-scoring choice covers that spot";
+    }
+    const uses = picks.filter((p) => p.item.brandId === item.brandId).length;
+    if (uses >= inp.maxBrandRepeats) {
+      return `${brandById.get(item.brandId)?.name ?? item.brandId} already plays ${inp.maxBrandRepeats} times this episode, the most allowed`;
+    }
+    const brand = brandById.get(item.brandId);
+    const shortest = brand && shortestCreative(brand, inp.language);
+    if (!shortest || used + shortest.durationSec > maxAdSec + 1e-9) {
+      return `would exceed the ${Math.round(inp.maxAdLoadPct * 100)}% ad-load budget`;
+    }
+    return "a higher-scoring schedule exists without it";
+  };
+
+  return { picks, reasonUnpicked };
+}
+
 export async function runPlacement(
   ctx: StageContext,
   ingest: IngestArtifact,
@@ -242,41 +393,36 @@ export async function runPlacement(
   const lastAdSec = duration - cfg.placement.noAdLastSec;
   const windows = ingest.chunks.map((c) => ({ chunk: c.index + 1, from: c.offsetSec, to: Math.min(c.offsetSec + c.durationSec, lastAdSec) }));
 
-  const logs: SlotLog[] = [];
-  const breaks: Break[] = [];
-  const shown: string[] = [];
-  let previousBrand: string | undefined;
-  let lastCut = -Infinity;
-  let adSecondsLeft = cfg.pacing.maxAdLoadPct * duration;
+  // ---- Phase 1: every chunk with dialogue, called independently and in parallel. No chunk is told
+  // what any other chunk decided (see prompts/placement.ts); each option that passes its own content
+  // checks becomes a schedulable ScheduleItem. Not order-dependent, so nothing here is skipped for
+  // being "too close" to another chunk — that is a scheduling question, answered in phase 2.
+  const logs: SlotLog[] = windows.map((w) => ({ slot: w.chunk, window: [w.from, w.to] as [number, number], currentLines: 0, options: [] }));
+  const itemsByChunk: ScheduleItem[][] = windows.map(() => []);
+  // Where each ScheduleItem's SlotLog entry lives, so phase 2/3 can update outcome/problems on it later.
+  const entryFor = new Map<ScheduleItem, SlotLog["options"][number]>();
 
-  // Chunks in order: each call knows the brands already placed before it.
-  for (const w of windows) {
-    // Never closer than placement.minGapSec to the previous ad.
-    const from = Math.max(w.from, lastCut + cfg.placement.minGapSec);
-    const current = from < w.to ? lines.filter((l) => l.end >= from && l.end <= w.to) : [];
-    const prev = lines.filter((l) => l.end < from && l.end >= from - cfg.placement.contextSec);
+  await mapLimit(windows, cfg.openrouter.concurrency, async (w, i) => {
+    const log = logs[i];
+    if (w.from >= w.to) {
+      log.error = `in the last ${cfg.placement.noAdLastSec}s of the episode, where no ad plays`;
+      return;
+    }
+    const current = lines.filter((l) => l.end >= w.from && l.end <= w.to);
+    const prev = lines.filter((l) => l.end < w.from && l.end >= w.from - cfg.placement.contextSec);
     const next = lines.filter((l) => l.start > w.to && l.start <= w.to + cfg.placement.contextSec);
-    const log: SlotLog = { slot: w.chunk, window: [from, w.to], currentLines: current.length, options: [] };
-    logs.push(log);
+    log.currentLines = current.length;
     if (!current.length) {
-      log.error =
-        w.from >= w.to
-          ? `in the last ${cfg.placement.noAdLastSec}s of the episode, where no ad plays`
-          : from >= w.to
-            ? "the whole chunk is within the minimum gap after the previous ad"
-            : "no dialogue in this chunk";
-      continue;
+      log.error = "no dialogue in this chunk";
+      return;
     }
     const sig = { silences, shotCuts };
     const show = cfg.placement.showSilenceMinSec;
-    const selectable = brands.filter((b) => b.id !== previousBrand);
-    const system = placementSystemPrompt({ blockAll, previousBrandName: brandName(previousBrand), lineCount: current.length });
+    const system = placementSystemPrompt({ blockAll, lineCount: current.length });
     const user = placementUserPrompt({
       storySoFar: programme?.summary ?? "",
       brands: brands.map(toPlacementBrand),
-      brandsAlreadyShown: shown.map((id) => brandName(id)!),
-      previousBrandName: brandName(previousBrand),
-      previousLines: renderLines(prev, "P", sig, { from: prev[0]?.start ?? from, to: current[0].start, showSilenceMinSec: show }),
+      previousLines: renderLines(prev, "P", sig, { from: prev[0]?.start ?? w.from, to: current[0].start, showSilenceMinSec: show }),
       currentLines: renderLines(current, "", sig, {
         from: current[0].start,
         to: next[0]?.start ?? current.at(-1)!.end + 10,
@@ -294,29 +440,20 @@ export async function runPlacement(
           system,
           user,
           schemaName: "ad_slot_plan",
-          schema: placementJsonSchema({
-            lineCount: current.length,
-            brandIds: selectable.map((b) => b.id),
-            contexts: ctx.catalogue.negativeVocab,
-          }),
+          schema: placementJsonSchema({ lineCount: current.length, brandIds: brands.map((b) => b.id), contexts: ctx.catalogue.negativeVocab }),
           logFile: llmLog,
         }),
       );
     } catch (err) {
       // When unsure, don't place: a failed call leaves the chunk empty.
       log.error = `placement call failed: ${(err as Error).message.slice(0, 200)}`;
-      continue;
+      return;
     }
     log.answer = answer;
 
-    // The model's pick, then its alternatives, in order; the first that passes every check wins.
     for (const o of [answer.placement, ...answer.alternatives].filter((x): x is NonNullable<typeof x> => !!x)) {
       const entry: SlotLog["options"][number] = { lineId: o.line_id, brandId: o.brand_id, fit: o.fit, reason: o.reason, outcome: "rejected", problems: [] };
       log.options.push(entry);
-      if (log.accepted) {
-        entry.problems.push("not needed: an earlier option was accepted");
-        continue;
-      }
       const line = current[o.line_id - 1];
       if (!line) {
         entry.problems.push(`line ${o.line_id} is not one of this chunk's lines`);
@@ -338,47 +475,71 @@ export async function runPlacement(
         continue;
       }
       entry.problems.push(
-        ...checkOption(
-          { brandId: o.brand_id, fit: o.fit },
-          { brands, previousBrand, blockAll, contextsNearby: answer.contexts_nearby, minBrandFit: cfg.thresholds.minBrandFit },
-        ),
+        ...checkOption({ brandId: o.brand_id, fit: o.fit }, { brands, blockAll, contextsNearby: answer.contexts_nearby, minBrandFit: cfg.placement.minBrandFit }),
       );
       if (entry.problems.length) continue;
 
-      // Final gate, same as the rule-based pipeline: nobody speaking at the cut (VAD, then LLM if unsure).
-      const probe = { id: `chunk${w.chunk}-line${o.line_id}`, cutTime: cut.cutTime } as MatchedCandidate;
-      if (cfg.thresholds.listenCheckCuts) {
-        await listenCheck(ctx, probe, ingest.fullAudio, duration, speech);
-        if (probe.rejected) {
-          entry.problems.push(probe.rejected.reason);
-          continue;
-        }
+      const item: ScheduleItem = { chunk: w.chunk, lineId: o.line_id, brandId: o.brand_id, fit: o.fit, reason: o.reason, cutTime: cut.cutTime, basis: cut.basis!, pauseSec: cut.pauseSec };
+      itemsByChunk[i].push(item);
+      entryFor.set(item, entry);
+    }
+  });
+
+  // ---- Phase 2/3: schedule the best combination, then verify each chosen cut is clear of speech.
+  // A cut that fails is dropped from its chunk's pool and the schedule is redrawn without it — bounded,
+  // and each item is only ever listen-checked once, so cost stays close to one check per final ad.
+  const verified = new Set<ScheduleItem>();
+  let picks: ScheduledPick[] = [];
+  let reasonUnpicked: (item: ScheduleItem) => string = () => "";
+  for (let round = 0; round < MAX_RESCHEDULE_ROUNDS; round++) {
+    ({ picks, reasonUnpicked } = scheduleBreaks({
+      itemsByChunk,
+      brands,
+      durationSec: duration,
+      maxAdLoadPct: cfg.pacing.maxAdLoadPct,
+      weights: cfg.scoring.combined,
+      language: cfg.contentLanguage,
+      repeatPenalty: cfg.placement.brandRepeatPenalty,
+      maxBrandRepeats: maxBrandRepeats(duration),
+    }));
+    if (!cfg.thresholds.listenCheckCuts) break;
+    let anyDropped = false;
+    for (const p of picks) {
+      if (verified.has(p.item)) continue;
+      const probe = { id: `chunk${p.item.chunk}-line${p.item.lineId}`, cutTime: p.item.cutTime } as MatchedCandidate;
+      await listenCheck(ctx, probe, ingest.fullAudio, duration, speech);
+      if (probe.rejected) {
+        entryFor.get(p.item)!.problems.push(probe.rejected.reason);
+        itemsByChunk[p.item.chunk - 1] = itemsByChunk[p.item.chunk - 1].filter((it) => it !== p.item);
+        anyDropped = true;
+      } else {
+        verified.add(p.item);
       }
-      const brand = brands.find((b) => b.id === o.brand_id)!;
-      const creative = pickCreative(brand, adSecondsLeft, cfg.contentLanguage);
-      if (!creative) {
-        entry.problems.push("no ad of this brand fits the remaining ad time");
-        continue;
-      }
-      entry.outcome = "accepted";
-      log.accepted = { lineId: o.line_id, brandId: o.brand_id, cutTime: cut.cutTime, creativeId: creative.id };
-      adSecondsLeft -= creative.durationSec;
-      lastCut = cut.cutTime;
-      previousBrand = o.brand_id;
-      if (!shown.includes(o.brand_id)) shown.push(o.brand_id);
-      breaks.push({
-        candidateId: `slot-${w.chunk}`,
-        timeSec: cut.cutTime,
-        brandId: o.brand_id,
-        creativeId: creative.id,
-        adDurationSec: creative.durationSec,
-        whereScore: Math.min(1, cut.pauseSec / 3),
-        fit: o.fit,
-        combinedScore: o.fit,
-        reason: o.reason,
-      });
+    }
+    if (!anyDropped) break;
+  }
+
+  // Every item the schedule didn't use gets a reason; the picks get their creative and outcome.
+  for (const items of itemsByChunk) {
+    for (const item of items) {
+      if (!picks.some((p) => p.item === item)) entryFor.get(item)!.problems.push(reasonUnpicked(item));
     }
   }
+  const breaks: Break[] = picks.map((p) => {
+    entryFor.get(p.item)!.outcome = "accepted";
+    logs[p.item.chunk - 1].accepted = { lineId: p.item.lineId, brandId: p.item.brandId, cutTime: p.item.cutTime, creativeId: p.creative.id };
+    return {
+      candidateId: `slot-${p.item.chunk}`,
+      timeSec: p.item.cutTime,
+      brandId: p.item.brandId,
+      creativeId: p.creative.id,
+      adDurationSec: p.creative.durationSec,
+      whereScore: Math.min(1, p.item.pauseSec / 3),
+      fit: p.item.fit,
+      combinedScore: p.combinedScore,
+      reason: p.item.reason,
+    };
+  });
 
   const log: SelectionLog[] = logs.map((l) =>
     l.accepted

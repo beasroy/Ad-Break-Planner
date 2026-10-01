@@ -11,7 +11,7 @@ export const seg = (id: number, start: number, end: number, extra: Partial<Segme
   end,
   text: `line ${id}`,
   chunkIndex: 0,
-  source: "deepgram",
+  source: "scribe",
   ...extra,
 });
 

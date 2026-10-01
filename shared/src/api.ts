@@ -1,5 +1,5 @@
 // PROVISIONAL: endpoint contracts until API_SPEC.md lands.
-import type { AuditEvent, Job, JobAttempt, ModelCall, ModelUsage } from "./job";
+import type { AuditEvent, CallKindUsage, Job, JobAttempt, ModelCall, ModelUsage, StageUsage } from "./job";
 import type { Break } from "./pipeline";
 
 /** POST /api/jobs  (multipart, field "video") */
@@ -40,7 +40,12 @@ export interface JobAuditResponse {
   jobId: string;
   attempts: JobAttempt[];
   events: AuditEvent[];
+  /** Every call this job made, by provider+model. */
   usage: ModelUsage[];
+  /** The same calls, by pipeline stage (ingest, transcribe, match, ...). */
+  byStage: StageUsage[];
+  /** The same calls again, by what each call was for (e.g. "placement chunk N", "story", "listen ..."). */
+  byKind: CallKindUsage[];
   totals: { calls: number; errors: number; costUsd: number };
   /** Most recent calls first. */
   modelCalls: ModelCall[];

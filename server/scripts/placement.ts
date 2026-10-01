@@ -1,6 +1,12 @@
 // Run only the LLM placement stage against a video's cached upstream artifacts (ingest, transcript,
 // signals), so a prompt or logic change can be tried without the full pipeline.
-// Only the LLM calls cost money (one per chunk, plus one episode summary, cached in playground/).
+// Only the LLM calls cost money: one placement call for EVERY chunk with dialogue (they run in
+// parallel and independently, so none can be skipped upfront for being close to another), plus one
+// cached episode summary, both on the reasoning model (Luna). If a scheduled cut is ambiguous to the
+// free voice detector, the verification step also calls the transcribe model (Gemini) a couple of
+// times per accepted ad to confirm nobody speaks.
+// To test the placement prompt only, on Luna alone, turn that check off for this run:
+//   LISTEN_CHECK_CUTS=false npm run placement -w server -- <hash-prefix>
 //   npm run placement -w server -- <hash-prefix> [--cached]
 // Results go to data/<hash>/playground/ (placement.json, placement-llm.jsonl, programme.json), never over the app's own
 // placement.json, so the next real run is not invalidated. Every run calls the model again unless --cached.
@@ -34,6 +40,25 @@ const need = async <T>(name: string): Promise<T> => {
 const ingest = await need<IngestArtifact>(ARTIFACTS.ingest);
 const transcript = await need<Transcript>(ARTIFACTS.transcript);
 const signals = await need<Signals>(ARTIFACTS.signals);
+
+// These artifacts are read as-is, so a transcript left over from an older transcriber would be used
+// silently and every result below would describe dialogue the pipeline no longer sees.
+if (!transcript.providers?.scribe) {
+  throw new Error(
+    `${ARTIFACTS.transcript} in ${srcDir} was not produced by Scribe (providers: ${JSON.stringify(transcript.providers)}).\n` +
+      `  Rebuild it first: npm run stage -w server -- transcribe ${hash.slice(0, 8)}\n` +
+      `  (free when the raw responses are already cached under transcribe/scribe-*)`,
+  );
+}
+
+// The episode summary is itself cached (keyed on the transcript + model, like every other artifact),
+// so a real pipeline run on this video has probably already paid for it. Reuse that copy the first
+// time this video is played with here, instead of paying for it again; runStory still recomputes it
+// on its own if the transcript or model has since changed, or leaves an existing playground copy alone.
+const playgroundProgramme = path.join(dir, ARTIFACTS.programme);
+if (!(await exists(playgroundProgramme)) && (await exists(path.join(srcDir, ARTIFACTS.programme)))) {
+  await fs.copyFile(path.join(srcDir, ARTIFACTS.programme), playgroundProgramme);
+}
 
 if (!flags.includes("--cached")) await fs.rm(path.join(dir, ARTIFACTS.placement), { force: true });
 

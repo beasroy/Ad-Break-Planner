@@ -16,14 +16,14 @@ export interface LlmListenAnswer {
   transcript: string;
 }
 
-/** Pure: any Deepgram word inside ±windowSec of the cut. */
-export const deepgramWordNear = (speech: Interval[], cut: number, windowSec: number) =>
+/** Pure: any transcribed word or audio event inside ±windowSec of the cut. */
+export const speechIntervalNear = (speech: Interval[], cut: number, windowSec: number) =>
   speech.some((w) => w.start < cut + windowSec && w.end > cut - windowSec);
 
-/** Pure: "speech" / "quiet" when VAD (plus Deepgram) is clear, else "unsure" (ask the LLM). */
-export function vadGate(vad: VadScore, deepgramNear: boolean, t: ListenThresholds): "speech" | "quiet" | "unsure" {
+/** Pure: "speech" / "quiet" when VAD (plus the transcript) is clear, else "unsure" (ask the LLM). */
+export function vadGate(vad: VadScore, speechNear: boolean, t: ListenThresholds): "speech" | "quiet" | "unsure" {
   if (vad.max >= t.vadSpeechMin) return "speech";
-  if (vad.max < t.vadQuietMax && !deepgramNear) return "quiet";
+  if (vad.max < t.vadQuietMax && !speechNear) return "quiet";
   return "unsure";
 }
 

@@ -1,7 +1,12 @@
-// Prompt playground: one plain OpenRouter call for ONE stretch of an episode.
+// Prompt playground: one plain OpenRouter call for ONE chunk of an episode — the real prompt from
+// src/prompts/placement.ts, copied here so it can be tried without touching the app or the database.
+// Keep this in sync with that file: it is a copy, not an import, so it goes stale silently otherwise.
 // The transcript below has real measured silences and shot cuts (from signals.json) written
 // straight into it, next to where they actually happen. They are plain lines, not numbered,
 // and not turned into any "CUT OK" flag — the model reads them and judges for itself.
+// There is no "previous brand" or "brands already shown" here: in the real pipeline every chunk is
+// called independently and in parallel, so no chunk can be told what any other chunk decided — that
+// choice is made afterwards, across every chunk's answer, by scheduleBreaks in stages/placement.ts.
 //   node server/playground.js
 // Prints the full input and the model's output. Not used by the app.
 import dotenv from "dotenv";
@@ -11,20 +16,18 @@ dotenv.config({ path: new URL("../.env", import.meta.url).pathname, quiet: true 
 const MODEL = "openai/gpt-5.6-luna";
 const REASONING_EFFORT = "medium"; // low | medium | high
 
-/** Minimum fit for a placement to be accepted. */
-const MIN_FIT = 0.3;
+/** Minimum fit for a placement to be accepted (placement.minBrandFit in src/config.ts). */
+const MIN_FIT = 0.7;
 /** A context listed by more than this share of brands blocks every brand. */
 const BLOCK_ALL_SHARE = 0.5;
 
-// ---- Input 1: the story so far (the episode summary from the programme stage)
+// ---- Input 1: the story so far (the episode summary, cached in programme.json)
 const storySoFar =
   "A gritty Bengali drama follows rival workers, businessmen, police figures and families as a murder, workplace unrest, money disputes and threatening personal relationships fuel escalating conflict.";
 
-// ---- Input 2: brand history in this episode
-const brandsAlreadyShown = ["brand_g"];
-const previousBrand = "brand_g"; // the brand of the previous ad break, or null
-
-// ---- Input 3: the brands (all 8 in the catalogue, from catalogue/brands.json)
+// ---- Input 2: the brands (all 8 in the catalogue, from catalogue/brands.json). Every brand is
+// always selectable here — nothing is excluded for being "the previous brand", because at the point
+// any one chunk is called, no ad has been scheduled yet, so there is no previous brand to exclude.
 const brands = [
   {
     brand_id: "brand_a",
@@ -84,7 +87,7 @@ const brands = [
   },
 ];
 
-// ---- Input 4: the transcript, with real measured silences and shot cuts from signals.json
+// ---- Input 3: the transcript, with real measured silences and shot cuts from signals.json
 // written in directly, next to where they happen. Lines are "[start–end] text"; markers are
 // "· silence Xs [start–end]" and "· shot cut [time]" — plain lines, no numbers of their own.
 // (sample: mandaar.mp4, data/7226c8b3c2b53fd65bf94059906bdb0c15513a93319d41856a0219cd5bfec4e2)
@@ -187,16 +190,17 @@ const currentLineCount = currentLines.trim().split("\n").filter((l) => l.trim().
 const allNegative = [...new Set(brands.flatMap((b) => b.never_next_to))].sort();
 const blockAll = allNegative.filter((c) => brands.filter((b) => b.never_next_to.includes(c)).length / brands.length > BLOCK_ALL_SHARE);
 const brandName = (id) => brands.find((b) => b.brand_id === id)?.name ?? id;
-const selectableBrands = brands.filter((b) => b.brand_id !== previousBrand).map((b) => b.brand_id);
+const selectableBrands = brands.map((b) => b.brand_id); // every brand: nothing is excluded here (see note above)
 
-// ---- The prompt (system)
+// ---- The prompt (system) — kept word-for-word with prompts/placement.ts's placementSystemPrompt
 const rules = `
-You are the ad-break planner for a Bengali TV drama on a streaming service. You look at one short stretch of the episode and decide whether a mid-roll ad should play there, after which line, and for which brand.
+You are the ad-break planner for a Bengali TV drama on a streaming service. You look at one stretch of the episode and decide whether one mid-roll ad should play in it, after which line, and for which brand. Pick the single best moment in the whole stretch.
+
+You are one of several separate calls, one per stretch of the episode, each looking only at its own stretch. You are not told what any other stretch decided, and code will not necessarily use your pick even if it is good: it picks the best combination across every stretch afterwards, keeping ads apart and never repeating a brand back to back. Judge only your own stretch on its own merits.
 
 WHAT YOU RECEIVE
 - STORY SO FAR: a short summary of the episode, for background only.
 - BRANDS: each with "fits_scenes_about" (scenes it suits) and "never_next_to" (scenes it must never appear next to).
-- BRANDS ALREADY SHOWN in this episode, and the brand of the previous ad break.
 - PREVIOUS LINES (P1, P2, …) and NEXT LINES (N1, N2, …): dialogue just before and after. Context only. You cannot place an ad after these lines.
 - CURRENT LINES (1, 2, 3, …): the stretch you are planning. Ads can only go after one of these.
 - Mixed in between the dialogue lines, you will also see plain lines measured directly from the audio and picture, with no line number of their own:
@@ -218,15 +222,14 @@ Placement
 Suitability
 4. The brand must fit what the viewer just watched or is about to watch, using its "fits_scenes_about". A brand that only fits the episode's general theme, and nothing in the scenes around this line, does not fit.
 5. Never pick a brand when the scenes around the line involve anything in that brand's "never_next_to".
-6. If the scenes around the line involve any of these, place no ad at all: ${blockAll.join(", ")}.
-7. Never pick the brand of the previous ad break (${previousBrand ? brandName(previousBrand) : "none"}). When two brands fit about equally well, prefer one not yet shown.
+6. If the scenes around the line involve any of these, place no ad at all: ${blockAll.join(", ") || "(none)"}.
+7. You do not know which brand played before or after your stretch, so do not try to avoid repeats yourself. Instead, whenever two or more brands fit about equally well, make your alternatives different brands from your main pick and from each other: that gives code real choices to keep brands from repeating back to back.
 Honesty
 8. You only have dialogue and the measurements described above, not the picture itself. Judge the scene from what is said and measured. Do not assume things that are not there.
 9. If nothing in the current lines passes every rule, place no ad. A missing ad is better than a bad one.
 
 EXAMPLE (made up; its brands are not in your list)
 Brands: Brand X (travel/rail; fits "train journey", "station"; never next to "hospital"), Brand Y (snacks; fits "tea", "snacks"; never next to "hospital", "illness").
-Previous brand: Brand Y.
 Current lines:
 1. [410.0–412.1] The train leaves at six, don't be late.
 2. [412.4–414.0] I've packed the tiffin and the tickets.
@@ -236,7 +239,7 @@ Current lines:
 4. [423.5–425.9] Doctor, how is my father now?
 5. [426.2–428.0] We need to operate tonight.
 Output:
-{"placement": {"line_id": 3, "brand_id": "brand_x", "fit": 0.9, "reason": "The train-journey conversation ends at line 3, followed by a 5.9 s measured silence and a shot cut into a new scene, and Brand X fits the journey."}, "alternatives": [], "contexts_nearby": ["hospital", "illness"], "why_not_others": "Line 5 is inside a hospital emergency, which blocks every brand. Brand Y was the previous break."}
+{"placement": {"line_id": 3, "brand_id": "brand_x", "fit": 0.9, "reason": "The train-journey conversation ends at line 3, followed by a 5.9 s measured silence and a shot cut into a new scene, and Brand X fits the journey."}, "alternatives": [], "contexts_nearby": ["hospital", "illness"], "why_not_others": "Line 5 is inside a hospital emergency, which blocks every brand."}
 Note that line 3 still sits right before a hospital scene. Code will check that against each brand's never_next_to, which is why you must report contexts_nearby honestly.
 
 OUTPUT
@@ -252,21 +255,19 @@ Return JSON only, in exactly this shape:
 - brand_id: a brand_id from BRANDS.
 - fit (0–1): 0 = unrelated to the scenes around the line, 0.5 = loosely related, 1 = directly matches what they show.
 - reason: one English sentence: which conversation ends at that line, what silence or shot cut is there, and why this brand fits.
-- alternatives: up to 2 other valid choices, best first. Empty if none.
+- alternatives: 2 other valid choices, best first, preferably after different lines AND a different brand each (code checks every choice, and uses the next one if yours fails or if code needs a different brand here to avoid repeating one). Fewer only if fewer points pass the rules.
 - contexts_nearby: every item from any brand's "never_next_to" that appears in the scene before OR after your chosen line. Use the exact strings. Empty only if you are sure there is none.
 - why_not_others: one or two sentences on why other points were not chosen.
 `.trim();
 
-// ---- The input message (user)
+// ---- The input message (user) — kept word-for-word with placementUserPrompt (minus the "brands
+// already shown" / "previous ad break brand" lines, which no longer exist there either)
 const userMessage = `
 STORY SO FAR
 ${storySoFar}
 
 BRANDS
 ${JSON.stringify(brands, null, 2)}
-
-BRANDS ALREADY SHOWN: ${brandsAlreadyShown.length ? brandsAlreadyShown.map(brandName).join(", ") : "none"}
-PREVIOUS AD BREAK BRAND: ${previousBrand ? brandName(previousBrand) : "none"}
 
 PREVIOUS LINES (context only, no ads here)
 ${number(previousLines, "P")}
@@ -284,7 +285,7 @@ const choice = {
   additionalProperties: false,
   required: ["line_id", "brand_id", "fit", "reason"],
   properties: {
-    line_id: { type: "integer", minimum: 1, maximum: currentLineCount },
+    line_id: { type: "integer", enum: Array.from({ length: currentLineCount }, (_, i) => i + 1) },
     brand_id: { type: "string", enum: selectableBrands },
     fit: { type: "number" },
     reason: { type: "string" },
@@ -356,7 +357,9 @@ try {
   process.exit(1);
 }
 
-// ---- A few sanity checks code would run on the answer
+// ---- A few sanity checks code would run on the answer (the content-only ones: see checkOption in
+// stages/placement.ts. Not shown here: the same-brand-adjacent, repeat-cap and gap/budget checks —
+// those depend on every chunk's answer and the chosen schedule, which don't exist at this scale.)
 console.log("\n==================== CODE CHECKS ====================");
 const nearby = new Set(answer.contexts_nearby ?? []);
 const options = [answer.placement, ...(answer.alternatives ?? [])].filter(Boolean);
@@ -364,7 +367,6 @@ if (!options.length) console.log("No placement proposed: nothing to check.");
 for (const [i, o] of options.entries()) {
   const brand = brands.find((b) => b.brand_id === o.brand_id);
   const problems = [];
-  if (o.brand_id === previousBrand) problems.push("same brand as the previous break");
   if (!brand) problems.push(`unknown brand ${o.brand_id}`);
   const ownBlock = brand ? brand.never_next_to.filter((c) => nearby.has(c)) : [];
   if (ownBlock.length) problems.push(`brand's never_next_to reported nearby: ${ownBlock.join(", ")}`);

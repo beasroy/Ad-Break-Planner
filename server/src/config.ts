@@ -9,10 +9,21 @@ dotenv.config({ path: path.join(repoRoot, ".env") });
 
 const resolveFromRoot = (p: string) => (path.isAbsolute(p) ? p : path.join(repoRoot, p));
 
+/**
+ * The server's public address, used in every ad, VAST and VMAP link. A value without a scheme
+ * ("my-app.up.railway.app") would be read by browsers as a relative path and break every ad, so
+ * https:// is added (http:// for localhost); trailing slashes are dropped.
+ */
+export function normaliseBaseUrl(raw: string): string {
+  const v = raw.trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(v)) return v;
+  return `${/^(localhost|127\.|0\.0\.0\.0)/.test(v) ? "http" : "https"}://${v}`;
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 4000),
   /** Base URL baked into VMAP AdTagURIs and VAST MediaFiles. */
-  publicBaseUrl: process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`,
+  publicBaseUrl: normaliseBaseUrl(process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT ?? 4000}`),
   dataDir: resolveFromRoot(process.env.DATA_DIR ?? "data"),
   cataloguePath: resolveFromRoot(process.env.CATALOGUE_PATH ?? "catalogue/brands.json"),
   maxUploadBytes: 4 * 1024 ** 3,
@@ -39,9 +50,8 @@ export const config = {
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? "",
     baseUrl: "https://openrouter.ai/api/v1",
-    /** Fallback transcriber (per chunk, when Deepgram fails): audio-capable LLM with structured output.
-     *  Good Bengali text, but timestamps can drift by seconds. */
-    transcribeModel: process.env.MODEL_TRANSCRIBE ?? "google/gemini-3.8-flash",
+    /** Audio-capable LLM used by the listen gate to re-check a cut when the VAD is unsure. */
+    listenModel: process.env.MODEL_LISTEN ?? "google/gemini-3.8-flash",
     reasonModel: process.env.MODEL_REASON ?? "openai/gpt-5.6-luna",
     requestTimeoutMs: 90_000,
     concurrency: 4,
@@ -52,18 +62,24 @@ export const config = {
     rateLimitRetries: 4,
   },
 
-  /** Primary transcriber: audio-aligned word/utterance timestamps. nova-3 is the only Deepgram model with Bengali. */
-  deepgram: {
-    apiKey: process.env.DEEPGRAM_API_KEY ?? "",
-    baseUrl: "https://api.deepgram.com/v1",
-    model: process.env.DEEPGRAM_MODEL ?? "nova-3",
-    language: "bn",
-    /** Pause (sec) that splits utterances. */
+  /** The only transcriber: audio-aligned word timestamps, Bengali text, and audio-event tags. */
+  scribe: {
+    apiKey: process.env.ELEVENLABS_API_KEY ?? "",
+    baseUrl: "https://api.elevenlabs.io/v1",
+    model: process.env.SCRIBE_MODEL ?? "scribe_v2",
+    language: "ben",
+    diarize: true,
+    /** Pause (sec) that splits one run of words into separate utterances. */
     uttSplitSec: 0.5,
-    /** Deepgram stretches a word's end across a following pause (seen up to 20s). Speech walls use
-     *  each word capped to this length from its start; real Bengali words are well under 1s. */
-    maxWordSec: 1.0,
-    requestTimeoutMs: 60_000,
+    /** Scribe word timing is tight (median 0.22s, p99 1.2s), but a rare span runs to tens of
+     *  seconds; capping bounds that without truncating real words. */
+    maxWordSec: 2.0,
+    /** Audio events ([music], [crying], [screaming]) carry no words but are not silence, so they
+     *  count as speech walls: no cut may land inside one. */
+    audioEventsAreSpeech: true,
+    /** Billed per hour of audio; Scribe returns no price, so cost is derived from this. */
+    usdPerHour: Number(process.env.SCRIBE_USD_PER_HOUR ?? 0.22),
+    requestTimeoutMs: 180_000,
     retries: 1,
   },
 
@@ -97,10 +113,15 @@ export const config = {
     mode: (process.env.PLACEMENT_MODE === "rules" ? "rules" : "llm") as "llm" | "rules",
     /** Seconds of dialogue shown before and after each slot, as context. */
     contextSec: 90,
-    /** Minimum seconds between two ads in llm mode (the rules mode uses pacing.minGapSec). */
-    minGapSec: 300,
     /** No ad in the last this-many seconds of the episode (llm mode). */
     noAdLastSec: 90,
+    /** Subtracted from a schedule candidate's score for every earlier use of the same brand in the
+     *  episode (llm mode): a tie-break against repeats, not a ban — see placement.ts's maxBrandRepeats
+     *  for the hard cap. With a small catalogue, some repetition across an episode is unavoidable. */
+    brandRepeatPenalty: 0.15,
+    /** Minimum fit to place an ad in llm mode (the rules mode uses thresholds.minBrandFit, 0.3): a
+     *  strict quality gate — an option scoring below this is never shown, whatever else is going on. */
+    minBrandFit: 0.7,
     /** Measured silences shorter than this are not shown to the model. */
     showSilenceMinSec: 0.5,
   },
@@ -145,7 +166,7 @@ export const config = {
     recheckPadSec: 0.5,
     /** Final gate: an audio LLM listens to 6s around each brand-matched cut and is asked directly
      *  whether anyone speaks within 1s of it. Caught shouted dialogue both transcribers missed. */
-    listenCheckCuts: true,
+    listenCheckCuts: process.env.LISTEN_CHECK_CUTS !== "false",
     /** LLM transcript timestamps drift by a few seconds, so look this far either side of the
      *  estimated scene change for the real pause. The cut still has to be in measured silence. */
     boundarySearchSec: 3,

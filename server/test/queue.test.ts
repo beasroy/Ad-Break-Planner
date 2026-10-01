@@ -195,6 +195,29 @@ describe("repo: model calls", () => {
     expect(a.usage).toEqual([{ provider: "openrouter", model: "m", calls: 2, errors: 1, totalLatencyMs: 200, costUsd: 0.01, audioSec: 0 }]);
     expect(a.totals).toEqual({ calls: 2, errors: 1, costUsd: 0.01 });
   });
+
+  it("also sums by stage, and by call kind with numbers blanked out of the label", () => {
+    const { repo } = setup();
+    upload(repo);
+    const base = { jobId: ID, attempt: 1, provider: "openrouter" as const, startedAt: "t", latencyMs: 100, ok: true };
+    repo.recordModelCall({ ...base, stage: "match", model: "reason-model", label: "placement chunk 1", costUsd: 0.25 });
+    repo.recordModelCall({ ...base, stage: "match", model: "reason-model", label: "placement chunk 2", costUsd: 0.25 });
+    repo.recordModelCall({ ...base, stage: "match", model: "reason-model", label: "story", costUsd: 0.25 });
+    repo.recordModelCall({ ...base, stage: "match", model: "listen-model", label: "listen chunk1-line5 #1", costUsd: 0.125 });
+    repo.recordModelCall({ ...base, stage: "transcribe", provider: "elevenlabs", model: "scribe_v2", label: "chunk_000.mp3", costUsd: 0 });
+    const a = repo.getAudit(ID)!;
+
+    expect(a.byStage).toEqual([
+      { stage: "match", calls: 4, errors: 0, totalLatencyMs: 400, costUsd: 0.875, audioSec: 0 },
+      { stage: "transcribe", calls: 1, errors: 0, totalLatencyMs: 100, costUsd: 0, audioSec: 0 },
+    ]);
+    expect(a.byKind).toEqual([
+      { kind: "placement chunk N", provider: "openrouter", model: "reason-model", calls: 2, errors: 0, costUsd: 0.5, audioSec: 0 },
+      { kind: "story", provider: "openrouter", model: "reason-model", calls: 1, errors: 0, costUsd: 0.25, audioSec: 0 },
+      { kind: "listen chunkN-lineN #N", provider: "openrouter", model: "listen-model", calls: 1, errors: 0, costUsd: 0.125, audioSec: 0 },
+      { kind: "chunk_N.mpN", provider: "elevenlabs", model: "scribe_v2", calls: 1, errors: 0, costUsd: 0, audioSec: 0 },
+    ]);
+  });
 });
 
 describe("queue", () => {

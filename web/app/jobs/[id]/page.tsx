@@ -4,14 +4,15 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
-import { STAGES, type GetJobResponse, type Job } from "shared";
-import { fmtTime, getJob, retryJob, subscribeJobs } from "@/lib/api";
+import { STAGES, type GetJobResponse, type Job, type JobAuditResponse } from "shared";
+import { fmtTime, getJob, getJobAudit, retryJob, subscribeJobs } from "@/lib/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { STAGE_LABELS } from "@/lib/stages";
 
 export default function JobPage() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = useState<GetJobResponse | null>(null);
+  const [audit, setAudit] = useState<JobAuditResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
 
@@ -33,10 +34,14 @@ export default function JobPage() {
       getJob(id)
         .then((r) => !stop && setData((d) => (d && d.job.status === "done" ? { ...d, results: r.results } : d)))
         .catch((e: Error) => !stop && setError(e.message));
+    // Cost accrues as calls happen, so it's worth refreshing on every update, not just once done —
+    // this makes the cost panel update live while the job is still running.
+    const loadAudit = () => getJobAudit(id).then((a) => !stop && setAudit(a)).catch(() => {});
     const apply = (job: Job) => {
       setError(null);
       setData((d) => ({ job, results: job.status === "done" ? d?.results : undefined }));
       if (job.status === "done") loadResults();
+      loadAudit();
     };
     const close = subscribeJobs(
       { jobId: id },
@@ -45,6 +50,7 @@ export default function JobPage() {
         job: apply,
         deleted: () => {
           setData(null);
+          setAudit(null);
           setError("This video was deleted.");
         },
       },
@@ -172,6 +178,74 @@ export default function JobPage() {
               </table>
             </div>
           )}
+        </section>
+      )}
+
+      {audit && audit.totals.calls > 0 && (
+        <section className="space-y-3">
+          <h2 className="font-semibold">
+            API cost{" "}
+            <span className="font-normal text-muted">
+              (${audit.totals.costUsd.toFixed(4)} · {audit.totals.calls} call{audit.totals.calls === 1 ? "" : "s"}
+              {audit.totals.errors ? `, ${audit.totals.errors} failed` : ""})
+            </span>
+          </h2>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="overflow-x-auto rounded-2xl border border-border bg-surface/90">
+              <table className="w-full text-sm">
+                <thead className="bg-surface-elevated text-left text-muted">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Pipeline stage</th>
+                    <th className="px-3 py-2 font-medium">Calls</th>
+                    <th className="px-3 py-2 font-medium">Cost</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {audit.byStage.map((s) => (
+                    <tr key={s.stage}>
+                      <td className="px-3 py-2">{STAGE_LABELS[s.stage as keyof typeof STAGE_LABELS] ?? s.stage}</td>
+                      <td className="px-3 py-2 font-mono">
+                        {s.calls}
+                        {s.errors ? <span className="text-accent-strong"> ({s.errors} failed)</span> : ""}
+                      </td>
+                      <td className="px-3 py-2 font-mono">${s.costUsd.toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="overflow-x-auto rounded-2xl border border-border bg-surface/90">
+              <table className="w-full text-sm">
+                <thead className="bg-surface-elevated text-left text-muted">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Call</th>
+                    <th className="px-3 py-2 font-medium">Model</th>
+                    <th className="px-3 py-2 font-medium">Calls</th>
+                    <th className="px-3 py-2 font-medium">Cost</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {audit.byKind.map((k) => (
+                    <tr key={`${k.kind}\0${k.provider}\0${k.model}`}>
+                      <td className="px-3 py-2">{k.kind}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-muted">{k.model}</td>
+                      <td className="px-3 py-2 font-mono">
+                        {k.calls}
+                        {k.errors ? <span className="text-accent-strong"> ({k.errors} failed)</span> : ""}
+                      </td>
+                      <td className="px-3 py-2 font-mono">
+                        {k.costUsd > 0 ? `$${k.costUsd.toFixed(4)}` : k.audioSec > 0 ? `${k.audioSec.toFixed(0)}s audio` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p className="text-xs text-muted">
+            Cost is the amount the provider reported for each call; Deepgram bills by audio duration instead of reporting a
+            price per call, so its rows show seconds transcribed.
+          </p>
         </section>
       )}
     </div>

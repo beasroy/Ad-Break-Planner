@@ -27,7 +27,7 @@ import {
 } from "../../prompts/listen";
 import { artifactPath, type StageContext } from "../context";
 import { decideEligibility, type EligibilityThresholds } from "./eligibility";
-import { deepgramWordNear, llmVerdict, vadGate, type LlmListenAnswer } from "./listen";
+import { llmVerdict, speechIntervalNear, vadGate, type LlmListenAnswer } from "./listen";
 
 export type RankFn = (before: Scene, after: Scene, eligible: Brand[]) => Promise<MatchedCandidate["ranked"]>;
 
@@ -144,10 +144,10 @@ export async function listenCheck(ctx: StageContext, m: MatchedCandidate, wav: s
     m.rejected = { stage: "match", reason: `speech check failed, cannot confirm no speech (${(err as Error).message.slice(0, 120)})` };
     return;
   }
-  const deepgramNear = deepgramWordNear(speech, cut, t.windowSec);
-  const gate = vadGate(vad, deepgramNear, t);
+  const speechNear = speechIntervalNear(speech, cut, t.windowSec);
+  const gate = vadGate(vad, speechNear, t);
   const round = (n: number) => Math.round(n * 1000) / 1000;
-  const base = { vad: { max: round(vad.max), frac: round(vad.frac) }, deepgramNear };
+  const base = { vad: { max: round(vad.max), frac: round(vad.frac) }, speechNear };
 
   if (gate !== "unsure") {
     const speechHeard = gate === "speech";
@@ -173,7 +173,7 @@ export async function listenCheck(ctx: StageContext, m: MatchedCandidate, wav: s
     Array.from({ length: t.llmVotes }, (_, i) =>
       chatJson({
         label: `listen ${m.id} #${i + 1}`,
-        model: ctx.config.openrouter.transcribeModel,
+        model: ctx.config.openrouter.listenModel,
         system: listenSystemPrompt,
         user: [
           { type: "text", text: listenUserText },
@@ -221,7 +221,7 @@ export async function runMatch(
       VAD_VERSION,
       ctx.config.listen,
       ctx.config.thresholds.listenCheckCuts,
-      ctx.config.openrouter.transcribeModel,
+      ctx.config.openrouter.listenModel,
       hashJson(speech),
     ],
   });

@@ -1,3 +1,5 @@
+import type { CallKindUsage, StageUsage } from "./job";
+
 export interface VideoMeta {
   durationSec: number;
   startTimeSec: number;
@@ -28,12 +30,9 @@ export interface Segment {
   text: string;
   chunkIndex: number;
   /** Which transcriber produced it. */
-  source: "deepgram" | "llm";
+  source: "scribe";
   /** Transcriber confidence (Deepgram utterance confidence), when available. */
   confidence?: number;
-  /** Timing came from an LLM and can drift by seconds; it is not used as a hard wall for cuts
-   *  (measured silence is the proof instead). Deepgram timing is audio-aligned and is. */
-  approxTiming?: boolean;
   /** Set when the hallucination filter removed it from the transcript. Still counts as occupied time for cuts. */
   dropped?: { reason: string };
 }
@@ -46,17 +45,25 @@ export interface Transcript {
   rawFieldsSeen: string[];
   /** Chunks each provider covered, e.g. { deepgram: 12, llm: 12 } when both succeeded everywhere. */
   providers: Record<string, number>;
-  /** Audio-aligned speech intervals (Deepgram words, each capped). Hard walls for cuts, separate from the
-   *  text segments, which may come from the LLM for better scene understanding. */
+  /** Audio-aligned speech intervals: every Scribe word (each capped), plus audio-event spans,
+   *  which carry no words but are not silence either. Hard walls for cuts. */
   speech: Interval[];
-  /** Time ranges where Deepgram succeeded, i.e. where `speech` is complete. "Nobody is speaking"
+  /** Time ranges the transcriber covered, i.e. where `speech` is complete. "Nobody is speaking"
    *  is only ever inferred inside these ranges. */
   speechCoverage: Interval[];
+  /** Non-speech sound Scribe named ([music], [crying], [screaming]). Already folded into `speech`;
+   *  kept separately because what the sound is matters for whether an ad belongs there. */
+  audioEvents: AudioEvent[];
 }
 
 export interface Interval {
   start: number;
   end: number;
+}
+
+export interface AudioEvent extends Interval {
+  /** Scribe's own label, e.g. "[বাদ্যসঙ্গীত]", "[screaming]". */
+  text: string;
 }
 
 export interface Signals {
@@ -140,7 +147,7 @@ export interface Candidate {
     speech: boolean;
     method: "vad" | "llm";
     vad: { max: number; frac: number };
-    deepgramNear: boolean;
+    speechNear: boolean;
     answers?: { speechNearMark: boolean; heard: string; transcript: string }[];
     reason: string;
   };
@@ -198,4 +205,8 @@ export interface DebugReport {
   breaks: Break[];
   /** LLM placement mode: every chunk, what the model was shown, what it answered, and what code accepted or rejected. */
   placement?: unknown;
+  /** Every API call recorded for this video, across every attempt (including earlier failed retries —
+   *  it's money already spent), and what it cost. Omitted for a CLI/script run that never opened the
+   *  database (npm run stage, playground). */
+  costSummary?: { totalUsd: number; totalCalls: number; totalErrors: number; byStage: StageUsage[]; byKind: CallKindUsage[] };
 }

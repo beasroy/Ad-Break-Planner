@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Candidate, IngestArtifact, Interval, Scene, ScoreWeights, Segment, Signals, Thresholds, Transcript } from "shared";
 import { ARTIFACTS, readKeyed, writeKeyed } from "../lib/artifacts";
-import { transcribeDeepgram } from "../lib/deepgram";
+import { transcribeScribe } from "../lib/scribe";
 import { encodeMp3Chunk } from "../lib/ffmpeg";
 import { hashJson } from "../lib/hash";
 import { mapLimit } from "../lib/pool";
@@ -69,9 +69,8 @@ export function findSafeInterval(
   const window = { start: lo - t.boundarySearchSec, end: hi + t.boundarySearchSec };
   const centre = (lo + hi) / 2;
 
-  // Audio-aligned segments are hard walls; LLM-timed ones are not trusted either way.
-  const walls = segments.filter((s) => !s.approxTiming);
-  const openTime = subtract(window, walls);
+  // Every segment is audio-aligned now, so all of them are hard walls.
+  const openTime = subtract(window, segments);
 
   // Measured silence inside the open time must itself be >= minSilenceMs; the cut is then
   // confined to its padded interior, away from where sound resumes.
@@ -130,10 +129,10 @@ export function findSafeInterval(
 /** Pure: build and score every scene-boundary candidate. */
 export function computeCandidates(inp: CandidateInputs): Candidate[] {
   const { scenes, signals, scoring } = inp;
-  // Deepgram speech intervals join the text segments as hard walls (source "deepgram" = audio-aligned).
+  // Speech intervals join the text segments as hard walls (audio-aligned, and including audio events).
   const segments: Segment[] = [
     ...inp.segments,
-    ...inp.speech.map((s, i): Segment => ({ id: -1 - i, start: s.start, end: s.end, text: "", chunkIndex: -1, source: "deepgram" })),
+    ...inp.speech.map((s, i): Segment => ({ id: -1 - i, start: s.start, end: s.end, text: "", chunkIndex: -1, source: "scribe" })),
   ];
   const out: Candidate[] = [];
 
@@ -193,26 +192,21 @@ export function applyRecheck(safe: Interval, heard: Interval[], padSec: number, 
 
 const MAX_RECHECK_CLIP_SEC = 30;
 
-/** Deepgram on a short clip of just the cut window; words come back on the absolute timeline (capped). */
+/** Scribe on a short clip of just the cut window; words come back on the absolute timeline (capped). */
 async function relisten(ctx: StageContext, wav: string, from: number, to: number): Promise<Interval[]> {
   const dir = artifactPath(ctx, "recheck");
   await fs.mkdir(dir, { recursive: true });
   const clip = path.join(dir, `clip_${from.toFixed(2)}_${to.toFixed(2)}.mp3`);
   await encodeMp3Chunk(wav, clip, from, to - from, "64k");
-  const raw = await transcribeDeepgram(clip);
-  const maxWord = ctx.config.deepgram.maxWordSec;
+  const raw = await transcribeScribe(clip);
+  const maxWord = ctx.config.scribe.maxWordSec;
   const words: Interval[] = [];
-  for (const u of raw?.results?.utterances ?? []) {
-    for (const w of u.words ?? []) {
-      const start = from + Number(w.start);
-      words.push({ start, end: Math.min(from + Number(w.end), start + maxWord) });
-    }
-  }
-  if (!words.length) {
-    for (const w of raw?.results?.channels?.[0]?.alternatives?.[0]?.words ?? []) {
-      const start = from + Number(w.start);
-      words.push({ start, end: Math.min(from + Number(w.end), start + maxWord) });
-    }
+  // Audio events count as sound here too; only the spacing separators are skipped.
+  for (const w of raw?.words ?? []) {
+    if ((w.type ?? "word") === "spacing") continue;
+    const start = from + Number(w.start);
+    const end = Math.min(from + Number(w.end), start + maxWord);
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) words.push({ start, end });
   }
   return words;
 }
@@ -236,7 +230,7 @@ export async function runCandidates(
     segments: hashJson(transcript.segments),
     speech: hashJson([transcript.speech ?? [], transcript.speechCoverage ?? []]),
     signals: hashJson(signals),
-    recheck: [ctx.config.thresholds.recheckCuts, ctx.config.thresholds.recheckPadSec, ctx.config.deepgram.model],
+    recheck: [ctx.config.thresholds.recheckCuts, ctx.config.thresholds.recheckPadSec, ctx.config.scribe.model],
   });
   const cached = ctx.force ? undefined : await readKeyed<Candidate[]>(out, key);
   if (cached) return cached;

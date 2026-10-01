@@ -1,104 +1,45 @@
-// Stage 2: transcribe each audio chunk with BOTH providers in parallel (raw responses
-// cached per provider per chunk), then merge onto one timeline.
-// - Deepgram nova-3: audio-aligned utterance timing → `speech` intervals, the hard walls for cuts.
-// - Gemini (LLM): better Bengali/dialect text → the `segments` scene understanding reads.
-// If one provider fails on a chunk the other covers it (Deepgram text, or LLM text without
-// walls); if both fail the stage fails, because a hole could hide a sensitive scene.
+// Stage 2: transcribe each audio chunk with ElevenLabs Scribe (raw responses cached per chunk),
+// then merge onto one timeline.
+// Scribe gives audio-aligned word timestamps (the hard walls for cuts), Bengali text, and tags for
+// non-speech sound. It returns words only — no utterances — so utterances are grouped here on a
+// pause. If a chunk fails the stage fails, because a hole in the transcript could hide a sensitive
+// scene and a cut would be placed as if nothing were happening there.
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { AudioChunk, IngestArtifact, Interval, Segment, Signals, Thresholds, Transcript } from "shared";
+import type { AudioChunk, AudioEvent, IngestArtifact, Interval, Segment, Signals, Thresholds, Transcript } from "shared";
 import { ARTIFACTS, readKeyed, writeKeyed, exists, readJson, writeJson } from "../lib/artifacts";
-import { transcribeDeepgram } from "../lib/deepgram";
 import { hashJson } from "../lib/hash";
-import { chatJson } from "../lib/openrouter";
 import { mapLimit } from "../lib/pool";
-import {
-  TRANSCRIBE_PROMPT_VERSION,
-  TranscribeResponse,
-  transcribeJsonSchema,
-  transcribeSystemPrompt,
-  transcribeUserText,
-} from "../prompts/transcribe";
+import { transcribeScribe, type ScribeResponse, type ScribeWord } from "../lib/scribe";
 import { artifactPath, type StageContext } from "./context";
 
 export interface RawChunkResult {
   chunkIndex: number;
-  /** Raw Deepgram response, when that call succeeded. */
-  deepgram?: any;
-  /** Raw LLM response ({ utterances }), when that call succeeded. */
-  llm?: any;
+  scribe: ScribeResponse;
+}
+
+export interface ScribeSettings {
+  uttSplitSec: number;
+  maxWordSec: number;
+  audioEventsAreSpeech: boolean;
 }
 
 /** Bump when merge/filter logic changes so cached transcripts are rebuilt (raw chunk responses are reused). */
-const TRANSCRIPT_BUILD_VERSION = 7;
+const TRANSCRIPT_BUILD_VERSION = 8;
 
-const providerDirs = (ctx: StageContext) => ({
-  deepgram: artifactPath(ctx, path.join("transcribe", `deepgram-${ctx.config.deepgram.model}`)),
-  llm: artifactPath(
-    ctx,
-    path.join("transcribe", `llm-${ctx.config.openrouter.transcribeModel.replace(/[^a-z0-9.-]+/gi, "_")}-v${TRANSCRIBE_PROMPT_VERSION}`),
-  ),
-});
-
-async function transcribeWithLlm(ctx: StageContext, chunk: AudioChunk) {
-  const data = (await fs.readFile(chunk.file)).toString("base64");
-  let lastErr = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const raw = await chatJson({
-        label: `transcribe chunk ${chunk.index}`,
-        model: ctx.config.openrouter.transcribeModel,
-        system: transcribeSystemPrompt,
-        user: [
-          { type: "text", text: transcribeUserText },
-          { type: "input_audio", input_audio: { data, format: path.extname(chunk.file).slice(1) } },
-        ],
-        schemaName: "transcript",
-        schema: transcribeJsonSchema,
-      });
-      return TranscribeResponse.parse(raw);
-    } catch (err) {
-      lastErr = (err as Error).message.slice(0, 300);
-      ctx.log(`LLM transcribe chunk ${chunk.index} attempt ${attempt + 1} failed: ${lastErr}`);
-    }
-  }
-  throw new Error(`LLM transcription failed for chunk ${chunk.index}: ${lastErr}`);
-}
-
-async function transcribeWithDeepgram(chunk: AudioChunk) {
-  const raw = await transcribeDeepgram(chunk.file);
-  if (!Array.isArray(raw?.results?.utterances)) throw new Error("no utterances in Deepgram response");
-  return raw;
-}
-
-/** Cached per provider per chunk; only missing responses are fetched. */
-async function cachedCall<T>(ctx: StageContext, dir: string, chunk: AudioChunk, fetch: () => Promise<T>): Promise<T> {
-  const file = path.join(dir, `chunk_${String(chunk.index).padStart(3, "0")}.json`);
-  if (!ctx.force && (await exists(file))) return readJson<T>(file);
-  const raw = await fetch();
-  await writeJson(file, raw);
-  return raw;
-}
+const scribeDir = (ctx: StageContext) => artifactPath(ctx, path.join("transcribe", `scribe-${ctx.config.scribe.model}`));
 
 export async function transcribeChunks(ctx: StageContext, ingest: IngestArtifact): Promise<RawChunkResult[]> {
-  const dirs = providerDirs(ctx);
-  await Promise.all(Object.values(dirs).map((d) => fs.mkdir(d, { recursive: true })));
+  const dir = scribeDir(ctx);
+  await fs.mkdir(dir, { recursive: true });
 
   return mapLimit(ingest.chunks, ctx.config.openrouter.concurrency, async (chunk) => {
-    const [dg, llm] = await Promise.allSettled([
-      cachedCall(ctx, dirs.deepgram, chunk, () => transcribeWithDeepgram(chunk)),
-      cachedCall(ctx, dirs.llm, chunk, () => transcribeWithLlm(ctx, chunk)),
-    ]);
-    if (dg.status === "rejected") ctx.log(`Deepgram failed on chunk ${chunk.index}: ${String(dg.reason?.message ?? dg.reason).slice(0, 200)}`);
-    if (llm.status === "rejected") ctx.log(`LLM failed on chunk ${chunk.index}: ${String(llm.reason?.message ?? llm.reason).slice(0, 200)}`);
-    if (dg.status === "rejected" && llm.status === "rejected") {
-      throw new Error(`both transcribers failed for chunk ${chunk.index}`);
-    }
-    return {
-      chunkIndex: chunk.index,
-      deepgram: dg.status === "fulfilled" ? dg.value : undefined,
-      llm: llm.status === "fulfilled" ? llm.value : undefined,
-    };
+    const file = path.join(dir, `chunk_${String(chunk.index).padStart(3, "0")}.json`);
+    if (!ctx.force && (await exists(file))) return { chunkIndex: chunk.index, scribe: await readJson<ScribeResponse>(file) };
+    const raw = await transcribeScribe(chunk.file);
+    if (!Array.isArray(raw?.words)) throw new Error(`no words in Scribe response for chunk ${chunk.index}`);
+    await writeJson(file, raw);
+    return { chunkIndex: chunk.index, scribe: raw };
   });
 }
 
@@ -115,13 +56,9 @@ export function silenceCoverage(seg: Interval, silences: Interval[]): number {
   return covered / len;
 }
 
-/**
- * Silence overlap only applies to audio-aligned (Deepgram) text segments: LLM timestamps can
- * drift by seconds, so the rule would throw away real dialogue.
- */
+/** Text sitting almost entirely inside measured silence is the transcriber inventing words. */
 export function hallucinationReason(seg: Segment, silences: Interval[], t: Thresholds): string | undefined {
   if (!seg.text.trim()) return "empty text";
-  if (seg.approxTiming) return undefined;
   const cov = silenceCoverage(seg, silences);
   if (cov >= t.hallucinationSilenceOverlap) return `${Math.round(cov * 100)}% inside silence`;
   return undefined;
@@ -131,109 +68,99 @@ type Piece = Omit<Segment, "id">;
 
 const valid = (p: Piece) => Number.isFinite(p.start) && Number.isFinite(p.end) && p.end > p.start && !!p.text;
 
-/** Pure: Deepgram utterances → absolute-time pieces, clamped to the chunk. */
-export function deepgramPieces(raw: any, chunk: AudioChunk): Piece[] {
+/** Words only: Scribe also returns "spacing" separators and "audio_event" tags on the same list. */
+const spokenWords = (raw: ScribeResponse): ScribeWord[] =>
+  (raw?.words ?? []).filter((w) => (w.type ?? "word") === "word" && Number.isFinite(w.start) && Number.isFinite(w.end));
+
+/** Pure: Scribe words → absolute-time pieces, one per run of words with no `uttSplitSec` pause in it. */
+export function scribePieces(raw: ScribeResponse, chunk: AudioChunk, uttSplitSec: number): Piece[] {
   const off = chunk.offsetSec;
   const chunkEnd = off + chunk.durationSec;
-  return (raw?.results?.utterances ?? [])
-    .map(
-      (u: any): Piece => ({
-        start: off + Math.max(0, Number(u.start)),
-        end: Math.min(off + Number(u.end), chunkEnd),
-        text: String(u.transcript ?? "").trim(),
-        chunkIndex: chunk.index,
-        source: "deepgram",
-        confidence: typeof u.confidence === "number" ? u.confidence : undefined,
-      }),
-    )
-    .filter(valid);
+  const out: Piece[] = [];
+  let cur: { start: number; end: number; words: string[] } | undefined;
+  const flush = () => {
+    if (cur) out.push({ start: cur.start, end: Math.min(cur.end, chunkEnd), text: cur.words.join(" ").trim(), chunkIndex: chunk.index, source: "scribe" });
+    cur = undefined;
+  };
+  for (const w of spokenWords(raw)) {
+    const start = off + Math.max(0, Number(w.start));
+    const end = off + Number(w.end);
+    if (cur && start - cur.end >= uttSplitSec) flush();
+    if (!cur) cur = { start, end, words: [] };
+    cur.end = Math.max(cur.end, end);
+    cur.words.push(String(w.text ?? "").trim());
+  }
+  flush();
+  return out.filter(valid);
+}
+
+/** Pure: sound Scribe named but produced no words for — music, laughter, crying. Absolute time. */
+export function scribeAudioEvents(raw: ScribeResponse, chunk: AudioChunk): AudioEvent[] {
+  const off = chunk.offsetSec;
+  const chunkEnd = off + chunk.durationSec;
+  return (raw?.words ?? [])
+    .filter((w) => w.type === "audio_event")
+    .map((w) => ({ start: off + Math.max(0, Number(w.start)), end: Math.min(off + Number(w.end), chunkEnd), text: String(w.text ?? "").trim() }))
+    .filter((e) => Number.isFinite(e.start) && Number.isFinite(e.end) && e.end > e.start);
 }
 
 /**
- * Pure: Deepgram words → audio-aligned speech intervals. Each word is capped to `maxWordSec`
- * from its start, because Deepgram stretches a word's end across the pause that follows it.
+ * Pure: Scribe words → audio-aligned speech intervals, each capped to `maxWordSec` from its start.
+ * Audio-event spans join them when `audioEventsAreSpeech`: they carry no words, but a cut inside a
+ * song or someone crying is exactly as wrong as one mid-sentence.
  */
-export function deepgramSpeech(raw: any, chunk: AudioChunk, maxWordSec: number): Interval[] {
+export function scribeSpeech(raw: ScribeResponse, chunk: AudioChunk, s: ScribeSettings): Interval[] {
   const off = chunk.offsetSec;
   const chunkEnd = off + chunk.durationSec;
   const out: Interval[] = [];
-  for (const u of raw?.results?.utterances ?? []) {
-    for (const w of u.words ?? []) {
-      const start = off + Math.max(0, Number(w.start));
-      const end = Math.min(off + Number(w.end), start + maxWordSec, chunkEnd);
-      if (Number.isFinite(start) && Number.isFinite(end) && end > start) out.push({ start, end });
-    }
+  for (const w of spokenWords(raw)) {
+    const start = off + Math.max(0, Number(w.start));
+    const end = Math.min(off + Number(w.end), start + s.maxWordSec, chunkEnd);
+    if (end > start) out.push({ start, end });
   }
+  if (s.audioEventsAreSpeech) out.push(...scribeAudioEvents(raw, chunk).map(({ start, end }) => ({ start, end })));
   return out;
 }
 
-/** Pure: LLM utterances → absolute-time pieces (approximate timing), clamped to the chunk. */
-export function llmPieces(raw: any, chunk: AudioChunk): Piece[] {
-  const off = chunk.offsetSec;
-  const chunkEnd = off + chunk.durationSec;
-  return (raw?.utterances ?? [])
-    .map(
-      (u: any): Piece => ({
-        start: off + Math.max(0, Number(u.start)),
-        end: Math.min(off + Number(u.end), chunkEnd),
-        text: String(u.text ?? "").trim(),
-        chunkIndex: chunk.index,
-        source: "llm",
-        approxTiming: true,
-      }),
-    )
-    .filter(valid);
-}
-
-/**
- * Pure: per chunk, text segments come from the LLM when available (better dialect
- * understanding), else Deepgram; speech walls come from every Deepgram word (capped).
- */
+/** Pure: every chunk's words and audio events merged onto one timeline. */
 export function buildTranscript(
   results: RawChunkResult[],
   chunks: AudioChunk[],
   silences: Interval[],
   t: Thresholds,
-  maxWordSec: number,
+  s: ScribeSettings,
 ): Transcript {
   const fields = new Set<string>();
   const providers: Record<string, number> = {};
   const text: Piece[] = [];
   const speech: Interval[] = [];
   const speechCoverage: Interval[] = [];
+  const audioEvents: AudioEvent[] = [];
   const sortedSilences = [...silences].sort((a, b) => a.start - b.start);
 
   for (const r of results) {
     const chunk = chunks.find((c) => c.index === r.chunkIndex);
     if (!chunk) throw new Error(`Unknown chunk ${r.chunkIndex}`);
-    const dg = r.deepgram ? deepgramPieces(r.deepgram, chunk) : [];
-    const lm = r.llm ? llmPieces(r.llm, chunk) : [];
-    if (r.deepgram) {
-      providers.deepgram = (providers.deepgram ?? 0) + 1;
-      for (const u of r.deepgram.results?.utterances ?? []) Object.keys(u).forEach((k) => fields.add(`deepgram.${k}`));
-    }
-    if (r.llm) {
-      providers.llm = (providers.llm ?? 0) + 1;
-      for (const u of r.llm.utterances ?? []) Object.keys(u).forEach((k) => fields.add(`llm.${k}`));
-    }
-    if (r.deepgram) {
-      speech.push(...deepgramSpeech(r.deepgram, chunk, maxWordSec));
-      speechCoverage.push({ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec });
-    }
-    text.push(...(r.llm ? lm : dg));
+    providers.scribe = (providers.scribe ?? 0) + 1;
+    for (const w of r.scribe.words ?? []) Object.keys(w).forEach((k) => fields.add(`scribe.${k}`));
+    text.push(...scribePieces(r.scribe, chunk, s.uttSplitSec));
+    speech.push(...scribeSpeech(r.scribe, chunk, s));
+    audioEvents.push(...scribeAudioEvents(r.scribe, chunk));
+    speechCoverage.push({ start: chunk.offsetSec, end: chunk.offsetSec + chunk.durationSec });
   }
 
   text.sort((a, b) => a.start - b.start || a.end - b.end);
   speech.sort((a, b) => a.start - b.start);
-  const segments: Segment[] = text.map((s, id) => {
-    const seg: Segment = { id, ...s };
+  audioEvents.sort((a, b) => a.start - b.start);
+  const segments: Segment[] = text.map((p, id) => {
+    const seg: Segment = { id, ...p };
     const reason = hallucinationReason(seg, sortedSilences, t);
     return reason ? { ...seg, dropped: { reason } } : seg;
   });
 
   const chunkSeams = chunks.slice(1).map((c) => c.offsetSec);
   speechCoverage.sort((a, b) => a.start - b.start);
-  return { segments, speech, speechCoverage, chunkSeams, rawFieldsSeen: [...fields].sort(), providers };
+  return { segments, speech, speechCoverage, audioEvents, chunkSeams, rawFieldsSeen: [...fields].sort(), providers };
 }
 
 export async function runTranscribe(
@@ -243,22 +170,23 @@ export async function runTranscribe(
   signals: Signals,
 ): Promise<Transcript> {
   const out = artifactPath(ctx, ARTIFACTS.transcript);
+  const { uttSplitSec, maxWordSec, audioEventsAreSpeech } = ctx.config.scribe;
+  const settings: ScribeSettings = { uttSplitSec, maxWordSec, audioEventsAreSpeech };
   const key = hashJson({
     v: TRANSCRIPT_BUILD_VERSION,
-    dirs: providerDirs(ctx),
+    dir: scribeDir(ctx),
     t: ctx.config.thresholds,
-    w: ctx.config.deepgram.maxWordSec,
+    s: settings,
     c: ingest.chunks.length,
-    r: raw.map((r) => [!!r.deepgram, !!r.llm]),
   });
   const cached = ctx.force ? undefined : await readKeyed<Transcript>(out, key);
   if (cached) return cached;
-  const transcript = buildTranscript(raw, ingest.chunks, signals.silences, ctx.config.thresholds, ctx.config.deepgram.maxWordSec);
+  const transcript = buildTranscript(raw, ingest.chunks, signals.silences, ctx.config.thresholds, settings);
   await writeKeyed(out, key, transcript);
   const dropped = transcript.segments.filter((s) => s.dropped).length;
   ctx.log(
-    `transcript: ${transcript.segments.length} text segments, ${transcript.speech.length} speech intervals ` +
-      `(${JSON.stringify(transcript.providers)}), ${dropped} flagged as hallucination`,
+    `transcript: ${transcript.segments.length} text segments, ${transcript.speech.length} speech intervals, ` +
+      `${transcript.audioEvents.length} audio events (${JSON.stringify(transcript.providers)}), ${dropped} flagged as hallucination`,
   );
   return transcript;
 }

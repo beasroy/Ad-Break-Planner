@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { Brand, Segment } from "shared";
-import { checkOption, cutAfterLine, freeIntervals, mergeSilences, renderLines } from "../src/stages/placement";
+import type { Segment } from "shared";
+import { checkOption, cutAfterLine, freeIntervals, mergeSilences, renderLines, scheduleBreaks, type ScheduleItem } from "../src/stages/placement";
+import { brand, SCORING } from "./fixtures";
 
-const seg = (start: number, end: number, text = "x"): Segment => ({ id: 0, start, end, text, chunkIndex: 0, source: "llm" });
+const seg = (start: number, end: number, text = "x"): Segment => ({ id: 0, start, end, text, chunkIndex: 0, source: "scribe" });
 
 describe("mergeSilences", () => {
   it("joins touching pieces", () => {
@@ -52,7 +53,6 @@ describe("cutAfterLine", () => {
   });
 });
 
-const brand = (id: string, negative: string[]): Brand => ({ id, name: id.toUpperCase(), category: "", targetContexts: [], negativeContexts: negative, creatives: [] });
 describe("freeIntervals", () => {
   it("returns the parts of a span with no (padded) word", () => {
     expect(freeIntervals({ start: 0, end: 10 }, [{ start: 2, end: 3 }, { start: 6, end: 7 }], 0.5)).toEqual([
@@ -69,9 +69,8 @@ describe("checkOption", () => {
   it("passes a clean option", () => {
     expect(checkOption({ brandId: "brand_a", fit: 0.9 }, base)).toEqual([]);
   });
-  it("rejects the previous brand, reported contexts, block-all contexts and low fit", () => {
-    const p = checkOption({ brandId: "brand_a", fit: 0.2 }, { ...base, previousBrand: "brand_a", contextsNearby: ["funeral", "violence"] });
-    expect(p.join(" | ")).toMatch(/previous break/);
+  it("rejects reported contexts, block-all contexts and low fit", () => {
+    const p = checkOption({ brandId: "brand_a", fit: 0.2 }, { ...base, contextsNearby: ["funeral", "violence"] });
     expect(p.join(" | ")).toMatch(/funeral/);
     expect(p.join(" | ")).toMatch(/blocks every brand/);
     expect(p.join(" | ")).toMatch(/fit 0.20/);
@@ -79,5 +78,92 @@ describe("checkOption", () => {
   it("rejects a brand reporting its own negative context, and an unknown brand", () => {
     expect(checkOption({ brandId: "brand_b", fit: 0.9 }, { ...base, contextsNearby: ["Eating "] })[0]).toMatch(/eating/);
     expect(checkOption({ brandId: "nope", fit: 0.9 }, base)).toEqual(["unknown brand nope"]);
+  });
+});
+
+describe("scheduleBreaks", () => {
+  const brands = [brand("a", []), brand("b", []), brand("c", [])];
+  const item = (chunk: number, cutTime: number, brandId: string, fit: number, pauseSec: number): ScheduleItem => ({
+    chunk,
+    lineId: 1,
+    brandId,
+    fit,
+    reason: `fits ${brandId}`,
+    cutTime,
+    basis: "silence",
+    pauseSec,
+  });
+  const run = (itemsByChunk: ScheduleItem[][], maxAdLoadPct = 0.15, extraBrands: typeof brands = [], repeatPenalty = 0, maxRepeats = 3) =>
+    scheduleBreaks({
+      itemsByChunk,
+      brands: [...brands, ...extraBrands],
+      durationSec: 2700,
+      maxAdLoadPct,
+      weights: SCORING.combined,
+      language: "bn",
+      repeatPenalty,
+      maxBrandRepeats: maxRepeats,
+    });
+
+  it("takes every item when nothing conflicts, however many that is", () => {
+    const a = item(1, 100, "a", 0.9, 3);
+    const b = item(2, 900, "b", 0.4, 0);
+    const c = item(3, 1700, "c", 0.9, 3);
+    expect(run([[a], [b], [c]]).picks.map((p) => p.item.brandId)).toEqual(["a", "b", "c"]);
+  });
+
+  it("no minimum gap: two different brands seconds apart both air", () => {
+    // Distinct brands, cut times only 5s apart — nothing here relies on any spacing between ads.
+    const close1 = item(1, 500, "a", 0.9, 3);
+    const close2 = item(2, 505, "b", 0.85, 3);
+    expect(run([[close1], [close2]]).picks.map((p) => p.item.brandId)).toEqual(["a", "b"]);
+  });
+
+  it("never repeats a brand back to back, even across a chunk skipped in between", () => {
+    // Chunk 2 offers its own best pick ("a", tying the brand either side) and an alternative ("b").
+    const c1 = item(1, 100, "a", 0.9, 3);
+    const c2a = item(2, 900, "a", 0.9, 3);
+    const c2b = item(2, 900, "b", 0.5, 3);
+    const c3 = item(3, 1700, "a", 0.9, 3);
+    expect(run([[c1], [c2a, c2b], [c3]]).picks.map((p) => p.item.brandId)).toEqual(["a", "b", "a"]);
+  });
+
+  it("stays under the ad-load budget, and says so for the item that didn't fit", () => {
+    const heavy = brand("heavy", [], [1000]); // its only creative is far longer than the budget
+    const heavyItem = item(1, 100, "heavy", 0.9, 3);
+    const light = item(2, 900, "light", 0.9, 3);
+    const { picks, reasonUnpicked } = run([[heavyItem], [light]], 0.15, [heavy, brand("light", [])]);
+    expect(picks.map((p) => p.item.brandId)).toEqual(["light"]);
+    expect(reasonUnpicked(heavyItem)).toMatch(/ad-load budget/);
+  });
+
+  it("the repeat penalty is a tie-break: a fresh brand wins a close call, but a clearly better repeat still airs", () => {
+    // "a" airs at chunk 1, "c" (a filler that always pays for itself) at chunk 2 — so "a" reappearing
+    // at chunk 3 would repeat, but is not adjacent to its first use (chunk 2's "c" sits between them;
+    // the same-brand-adjacent ban only forbids repeating right next to the brand's OWN last break).
+    const c1 = item(1, 100, "a", 0.9, 3); // score 0.96
+    const c2 = item(2, 700, "c", 0.6, 3); // score 0.84
+    // Close call: repeating "a" (0.96 - 0.15 penalty = 0.81) loses to fresh "b" (0.94, no penalty).
+    const closeA = item(3, 1300, "a", 0.9, 3);
+    const closeB = item(3, 1300, "b", 0.85, 3);
+    expect(run([[c1], [c2], [closeA, closeB]], 0.15, [], 0.15).picks.map((p) => p.item.brandId)).toEqual(["a", "c", "b"]);
+
+    // Not close: repeating "a" (0.98 - 0.15 = 0.83) still beats a much weaker fresh "b" (0.12).
+    const betterA = item(3, 1300, "a", 0.95, 3);
+    const worseB = item(3, 1300, "b", 0.3, 0);
+    expect(run([[c1], [c2], [betterA, worseB]], 0.15, [], 0.15).picks.map((p) => p.item.brandId)).toEqual(["a", "c", "a"]);
+  });
+
+  it("caps how many times a brand may air, however well it scores everywhere", () => {
+    // "a" (fillers of "c" keeping every use non-adjacent) would happily air a 3rd time — it scores
+    // far above "b" — but the cap forbids it, so the last chunk falls back to "b" instead.
+    const a1 = item(1, 500, "a", 0.9, 3);
+    const c1 = item(2, 1000, "c", 0.6, 3);
+    const a2 = item(3, 1500, "a", 0.9, 3);
+    const c2 = item(4, 2000, "c", 0.6, 3);
+    const a3 = item(5, 2500, "a", 0.9, 3);
+    const b3 = item(5, 2500, "b", 0.3, 0);
+    const { picks } = run([[a1], [c1], [a2], [c2], [a3, b3]], 0.15, [], 0, 2); // maxBrandRepeats = 2
+    expect(picks.map((p) => p.item.brandId)).toEqual(["a", "c", "a", "c", "b"]);
   });
 });

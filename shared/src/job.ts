@@ -81,7 +81,7 @@ export interface ModelCall {
   jobId?: string;
   attempt?: number;
   stage?: string;
-  provider: "openrouter" | "deepgram";
+  provider: "openrouter" | "elevenlabs";
   model: string;
   label?: string;
   startedAt: string;
@@ -101,6 +101,31 @@ export interface ModelUsage {
   calls: number;
   errors: number;
   totalLatencyMs: number;
+  costUsd: number;
+  audioSec: number;
+}
+
+/** Same calls as ModelUsage, grouped by pipeline stage instead of provider/model (e.g. how many
+ *  calls "transcribe" made vs "match", and what each cost) — one row per stage that made any call. */
+export interface StageUsage {
+  /** "(none)" for a call recorded outside any stage (a script, or the catalogue's brand-name check). */
+  stage: string;
+  calls: number;
+  errors: number;
+  totalLatencyMs: number;
+  costUsd: number;
+  audioSec: number;
+}
+
+/** Same calls again, grouped by what the call was FOR rather than by stage or model — e.g. "placement
+ *  chunk N" covers every per-chunk placement call as one row, however many chunks there were. The
+ *  call's label with any digits blanked out (so "placement chunk 4" and "placement chunk 11" merge). */
+export interface CallKindUsage {
+  kind: string;
+  provider: string;
+  model: string;
+  calls: number;
+  errors: number;
   costUsd: number;
   audioSec: number;
 }

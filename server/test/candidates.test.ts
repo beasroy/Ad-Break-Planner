@@ -53,12 +53,12 @@ describe("findSafeInterval", () => {
 });
 
 describe("±boundarySearchSec search around the estimated scene change", () => {
-  // Scene A "ends" at 20, scene B "starts" at 21 according to LLM timestamps.
+  // The scene boundary is an estimate; the transcript's own word timings are audio-aligned.
   const estimate = { start: 20, end: 21 };
-  const llm = (id: number, a: number, b: number) => seg(id, a, b, { approxTiming: true });
+  const around = [seg(0, 10, 20), seg(1, 24, 30)];
 
-  it("finds the real pause the LLM misplaced (under its own drifted timestamps)", () => {
-    const r = findSafeInterval(estimate, [llm(0, 10, 20), llm(1, 21, 30)], [{ start: 22.5, end: 23.8 }], [], 700, T);
+  it("finds the real pause near the estimate, just outside it", () => {
+    const r = findSafeInterval(estimate, around, [{ start: 22.5, end: 23.8 }], [], 700, T);
     expect(r.confirmed).toBe(true);
     expect(r.safe!.start).toBeCloseTo(22.5 + T.cutPaddingMs / 1000);
     expect(r.safe!.end).toBeCloseTo(23.8 - T.cutPaddingMs / 1000);
@@ -66,11 +66,11 @@ describe("±boundarySearchSec search around the estimated scene change", () => {
 
   it("does not look further than boundarySearchSec away", () => {
     const far = 21 + T.boundarySearchSec + 0.5;
-    const r = findSafeInterval(estimate, [llm(0, 10, 20), llm(1, 21, 30)], [{ start: far, end: far + 2 }], [], 700, T);
+    const r = findSafeInterval(estimate, [seg(0, 10, 20)], [{ start: far, end: far + 2 }], [], 700, T);
     expect(r.safe).toBeUndefined();
   });
 
-  it("still never cuts through audio-aligned (Deepgram) speech, even inside silence", () => {
+  it("still never cuts through speech, even inside silence", () => {
     const spoken = seg(1, 22, 24);
     const r = findSafeInterval(estimate, [spoken], [{ start: 22.5, end: 23.8 }], [], 700, T);
     expect(r.safe).toBeUndefined();
@@ -88,47 +88,41 @@ describe("±boundarySearchSec search around the estimated scene change", () => {
   });
 });
 
-describe("speech-free cuts (both transcribers hear nothing, e.g. music)", () => {
-  // Gemini: A ends ~20, B starts ~23. Deepgram words elsewhere. No measured silence (music).
+describe("speech-free cuts (nothing transcribed and no measured silence, e.g. music)", () => {
+  // A ends at 20, B starts at 23. Nothing transcribed between them, but no silence was measured.
   const estimate = { start: 20, end: 23 };
-  const gemini = [seg(0, 10, 20, { approxTiming: true, source: "llm" }), seg(1, 23, 33, { approxTiming: true, source: "llm" })];
-  const dgWord = (id: number, a: number, b: number) => seg(100 + id, a, b, { source: "deepgram" });
+  const around = [seg(0, 10, 20), seg(1, 23, 33)];
   const cover = [{ start: 0, end: 120 }];
 
-  it("allows a cut when neither Deepgram nor Gemini hears speech for >= minSpeechFreeSec", () => {
-    const r = findSafeInterval(estimate, [...gemini, dgWord(0, 18, 19.5), dgWord(1, 23.4, 24)], [], [], 700, T, cover);
+  it("allows a cut when nothing is transcribed for >= minSpeechFreeSec", () => {
+    const r = findSafeInterval(estimate, around, [], [], 700, T, cover);
     expect(r).toMatchObject({ basis: "speechFree", confirmed: false });
     expect(r.safe!.start).toBeCloseTo(20 + T.cutPaddingMs / 1000);
     expect(r.safe!.end).toBeCloseTo(23 - T.cutPaddingMs / 1000);
   });
 
-  it("a single Deepgram word inside the gap breaks it up", () => {
-    const r = findSafeInterval(estimate, [...gemini, dgWord(0, 21.2, 21.6)], [], [], 700, T, cover);
+  it("a single word inside the gap breaks it up", () => {
+    const r = findSafeInterval(estimate, [...around, seg(2, 21.2, 21.6)], [], [], 700, T, cover);
     expect(r.safe).toBeUndefined();
   });
 
-  it("a Gemini utterance alone also blocks it (both must agree)", () => {
-    const r = findSafeInterval(estimate, [...gemini, seg(2, 20, 23, { approxTiming: true, source: "llm" })], [], [], 700, T, cover);
-    expect(r.safe).toBeUndefined();
-  });
-
-  it("is never used where Deepgram did not cover the audio", () => {
-    expect(findSafeInterval(estimate, gemini, [], [], 700, T, []).safe).toBeUndefined();
-    expect(findSafeInterval(estimate, gemini, [], [], 700, T, [{ start: 60, end: 120 }]).safe).toBeUndefined();
+  it("is never used where the transcriber did not cover the audio", () => {
+    expect(findSafeInterval(estimate, around, [], [], 700, T, []).safe).toBeUndefined();
+    expect(findSafeInterval(estimate, around, [], [], 700, T, [{ start: 60, end: 120 }]).safe).toBeUndefined();
   });
 
   it("is not used across a transcription chunk seam", () => {
-    expect(findSafeInterval(estimate, gemini, [], [21.5], 700, T, cover).safe).toBeUndefined();
+    expect(findSafeInterval(estimate, around, [], [21.5], 700, T, cover).safe).toBeUndefined();
   });
 
   it("prefers measured silence when there is one", () => {
-    const r = findSafeInterval(estimate, gemini, [{ start: 20.5, end: 21.4 }], [], 700, T, cover);
+    const r = findSafeInterval(estimate, around, [{ start: 20.5, end: 21.4 }], [], 700, T, cover);
     expect(r.basis).toBe("silence");
   });
 
   it("scores speech-free gaps below equal silent gaps", () => {
     const scenes = [scene(0, { start: 10, end: 20 }), scene(1, { start: 23, end: 33 })];
-    const base = { scenes, segments: gemini, speech: [], chunkSeams: [], minSilenceMs: 700, thresholds: T, scoring: SCORING };
+    const base = { scenes, segments: around, speech: [], chunkSeams: [], minSilenceMs: 700, thresholds: T, scoring: SCORING };
     const music = computeCandidates({ ...base, speechCoverage: cover, signals: { silences: [], shotCuts: [] } })[0];
     const quiet = computeCandidates({ ...base, speechCoverage: cover, signals: { silences: [{ start: 20, end: 23 }], shotCuts: [] } })[0];
     expect(music.cutBasis).toBe("speechFree");
@@ -178,11 +172,11 @@ describe("computeCandidates", () => {
     expect(c.snappedTo).toBe("silenceMidpoint");
   });
 
-  it("Deepgram speech intervals block cuts even when the text segments are LLM-timed", () => {
-    const llmText = [seg(0, 0, 20, { approxTiming: true, source: "llm" }), seg(1, 23, 40, { approxTiming: true, source: "llm" })];
+  it("speech intervals block a cut the text segments alone would allow (e.g. an audio event)", () => {
+    const text = [seg(0, 0, 20), seg(1, 23, 40)];
     const base = {
       scenes,
-      segments: llmText,
+      segments: text,
       chunkSeams: [],
       signals: { silences: [{ start: 20.5, end: 22.5 }], shotCuts: [] },
       minSilenceMs: 700,
@@ -190,7 +184,7 @@ describe("computeCandidates", () => {
       scoring: SCORING,
     };
     expect(computeCandidates({ ...base, speech: [], speechCoverage: [] })[0].cutTime).toBeDefined();
-    // Someone is actually talking through the quiet window per Deepgram: no cut.
+    // A word or a named sound (music, crying) runs through the quiet window: no cut.
     expect(computeCandidates({ ...base, speech: [{ start: 20, end: 23 }], speechCoverage: [] })[0].rejected?.stage).toBe("candidates");
   });
 

@@ -5,6 +5,7 @@ import {
   STAGES,
   type AuditActor,
   type AuditEvent,
+  type CallKindUsage,
   type Job,
   type JobAttempt,
   type JobAuditResponse,
@@ -639,6 +640,38 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
         costUsd: u.cost,
         audioSec: u.audio,
       }));
+      const byStage = (
+        db
+          .prepare(
+            `SELECT COALESCE(stage, '(none)') AS stage, COUNT(*) AS calls, SUM(1 - ok) AS errors, SUM(latency_ms) AS latency,
+               COALESCE(SUM(cost_usd), 0) AS cost, COALESCE(SUM(audio_sec), 0) AS audio
+             FROM model_calls WHERE job_id = ? GROUP BY stage ORDER BY cost DESC`,
+          )
+          .all(jobId) as Row[]
+      ).map((s) => ({
+        stage: s.stage,
+        calls: s.calls,
+        errors: s.errors,
+        totalLatencyMs: s.latency,
+        costUsd: s.cost,
+        audioSec: s.audio,
+      }));
+      // Grouped in JS, not SQL: a call's label (e.g. "placement chunk 4") identifies WHAT it was for,
+      // but each chunk/candidate/attempt gets its own number, so calls of the same kind never share an
+      // exact label. Blanking digits merges "placement chunk 4" and "placement chunk 11" into one row
+      // without a hand-kept list of label patterns to keep in sync as labels change.
+      const byKindMap = new Map<string, CallKindUsage>();
+      for (const c of db.prepare("SELECT label, provider, model, ok, cost_usd, audio_sec FROM model_calls WHERE job_id = ?").all(jobId) as Row[]) {
+        const kind = (c.label ?? "(unlabeled)").replace(/\d+/g, "N");
+        const key = `${kind}\0${c.provider}\0${c.model}`;
+        const row = byKindMap.get(key) ?? { kind, provider: c.provider, model: c.model, calls: 0, errors: 0, costUsd: 0, audioSec: 0 };
+        row.calls++;
+        if (!c.ok) row.errors++;
+        row.costUsd += c.cost_usd ?? 0;
+        row.audioSec += c.audio_sec ?? 0;
+        byKindMap.set(key, row);
+      }
+      const byKind = [...byKindMap.values()].sort((a, b) => b.costUsd - a.costUsd);
       const modelCalls = (
         db.prepare("SELECT * FROM model_calls WHERE job_id = ? ORDER BY id DESC LIMIT ?").all(jobId, recentCalls) as Row[]
       ).map(
@@ -666,6 +699,8 @@ export function createRepo(db: DatabaseSync, clock: Clock = () => new Date(), on
         attempts,
         events,
         usage,
+        byStage,
+        byKind,
         totals: {
           calls: usage.reduce((s, u) => s + u.calls, 0),
           errors: usage.reduce((s, u) => s + u.errors, 0),
