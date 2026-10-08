@@ -44,7 +44,7 @@ describe("classifyError", () => {
       stage: "ingest",
       retryable: false,
     });
-    expect(classifyError(new StageError("scenes", new Error("OpenRouter HTTP 503")))).toMatchObject({ stage: "scenes", retryable: true });
+    expect(classifyError(new StageError("placement", new Error("OpenRouter HTTP 503")))).toMatchObject({ stage: "placement", retryable: true });
   });
 });
 
@@ -108,7 +108,7 @@ describe("repo: claiming", () => {
     const { repo, advance } = setup();
     upload(repo);
     repo.claimNext("w1");
-    expect(repo.fail(ID, "w1", 1, { error: "boom", stage: "scenes", retryable: true, retryDelaySec: 30 })).toBe("retrying");
+    expect(repo.fail(ID, "w1", 1, { error: "boom", stage: "placement", retryable: true, retryDelaySec: 30 })).toBe("retrying");
     expect(repo.claimNext("w1")).toBeUndefined();
     advance(31);
     expect(repo.claimNext("w1")?.attempt).toBe(2);
@@ -121,7 +121,7 @@ describe("repo: failures", () => {
     upload(repo, 2);
     for (const attempt of [1, 2]) {
       repo.claimNext("w1");
-      const outcome = repo.fail(ID, "w1", attempt, { error: "503", stage: "scenes", retryable: true, retryDelaySec: 30 });
+      const outcome = repo.fail(ID, "w1", attempt, { error: "503", stage: "placement", retryable: true, retryDelaySec: 30 });
       expect(outcome).toBe(attempt === 1 ? "retrying" : "error");
       advance(31);
     }
@@ -188,7 +188,7 @@ describe("repo: model calls", () => {
   it("sums calls, errors and cost per model", () => {
     const { repo } = setup();
     upload(repo);
-    const base = { jobId: ID, attempt: 1, stage: "scenes", provider: "openrouter" as const, model: "m", startedAt: "t", latencyMs: 100 };
+    const base = { jobId: ID, attempt: 1, stage: "placement", provider: "openrouter" as const, model: "m", startedAt: "t", latencyMs: 100 };
     repo.recordModelCall({ ...base, ok: true, costUsd: 0.01 });
     repo.recordModelCall({ ...base, ok: false, httpStatus: 503 });
     const a = repo.getAudit(ID)!;
@@ -200,15 +200,15 @@ describe("repo: model calls", () => {
     const { repo } = setup();
     upload(repo);
     const base = { jobId: ID, attempt: 1, provider: "openrouter" as const, startedAt: "t", latencyMs: 100, ok: true };
-    repo.recordModelCall({ ...base, stage: "match", model: "reason-model", label: "placement chunk 1", costUsd: 0.25 });
-    repo.recordModelCall({ ...base, stage: "match", model: "reason-model", label: "placement chunk 2", costUsd: 0.25 });
-    repo.recordModelCall({ ...base, stage: "match", model: "reason-model", label: "story", costUsd: 0.25 });
-    repo.recordModelCall({ ...base, stage: "match", model: "listen-model", label: "listen chunk1-line5 #1", costUsd: 0.125 });
+    repo.recordModelCall({ ...base, stage: "placement", model: "reason-model", label: "placement chunk 1", costUsd: 0.25 });
+    repo.recordModelCall({ ...base, stage: "placement", model: "reason-model", label: "placement chunk 2", costUsd: 0.25 });
+    repo.recordModelCall({ ...base, stage: "placement", model: "reason-model", label: "story", costUsd: 0.25 });
+    repo.recordModelCall({ ...base, stage: "placement", model: "listen-model", label: "listen chunk1-line5 #1", costUsd: 0.125 });
     repo.recordModelCall({ ...base, stage: "transcribe", provider: "elevenlabs", model: "scribe_v2", label: "chunk_000.mp3", costUsd: 0 });
     const a = repo.getAudit(ID)!;
 
     expect(a.byStage).toEqual([
-      { stage: "match", calls: 4, errors: 0, totalLatencyMs: 400, costUsd: 0.875, audioSec: 0 },
+      { stage: "placement", calls: 4, errors: 0, totalLatencyMs: 400, costUsd: 0.875, audioSec: 0 },
       { stage: "transcribe", calls: 1, errors: 0, totalLatencyMs: 100, costUsd: 0, audioSec: 0 },
     ]);
     expect(a.byKind).toEqual([

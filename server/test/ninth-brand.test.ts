@@ -1,14 +1,13 @@
 // A 9th, unseen brand added to the real catalogue file works with zero code changes:
-// its new negative context enters the vocab, blocks it, and it can win a break when it fits.
+// its new negative context enters the vocab and the placement schema's enum, it blocks the brand
+// when the model reports that context nearby, and the brand can win a break when it fits.
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import type { Brand, Candidate, Scene } from "shared";
 import { config } from "../src/config";
 import { parseCatalogue } from "../src/catalogue/loader";
-import { matchCandidates, type RankFn } from "../src/stages/match";
-import { selectBreaks } from "../src/stages/select";
-import { scenesJsonSchema } from "../src/prompts/scenes";
-import { scene, tag } from "./fixtures";
+import { placementJsonSchema } from "../src/prompts/placement";
+import { checkOption, scheduleBreaks, type ScheduleItem } from "../src/stages/placement";
+import { SCORING } from "./fixtures";
 
 const NINTH = {
   brand_id: "brand_ninth",
@@ -24,22 +23,16 @@ async function catalogueWithNinth() {
   return parseCatalogue([...raw, NINTH], "/tmp/cat");
 }
 
-// Stand-in for the LLM ranker: scores by overlap between the scene activity and target contexts.
-const overlapRank: RankFn = async (before, _after, eligible: Brand[]) =>
-  eligible.map((b) => ({
-    brandId: b.id,
-    fit: b.targetContexts.some((t) => before.activity.includes(t)) ? 1 : 0.1,
-    reason: "overlap",
-  }));
-
-const candidate = (id: string, t: number, a: number, b: number): Candidate => ({
-  id,
-  sceneBeforeId: a,
-  sceneAfterId: b,
-  gap: { start: t - 1, end: t + 1 },
-  safe: { start: t - 0.5, end: t + 0.5 },
-  cutTime: t,
-  where: { gap: 1, shotCut: 1, closure: 1, calm: 1, total: 0.9 },
+const item = (chunk: number, brandId: string, over: Partial<ScheduleItem> = {}): ScheduleItem => ({
+  chunk,
+  lineId: 1,
+  brandId,
+  fit: 0.9,
+  reason: "fits",
+  cutTime: chunk * 120,
+  basis: "silence",
+  pauseSec: 3,
+  ...over,
 });
 
 describe("9th brand, no code change", () => {
@@ -47,44 +40,45 @@ describe("9th brand, no code change", () => {
     const cat = await catalogueWithNinth();
     expect(cat.brands).toHaveLength(9);
     expect(cat.negativeVocab).toContain("flood");
-    const schema: any = scenesJsonSchema(cat.negativeVocab);
-    expect(schema.properties.scenes.items.properties.negative_contexts.items.properties.context.enum).toContain("flood");
+    const schema: any = placementJsonSchema({ lineCount: 3, brandIds: cat.brands.map((b) => b.id), contexts: cat.negativeVocab });
+    const choice = schema.properties.placement.anyOf[0];
+    expect(choice.properties.contexts_nearby.items.enum).toContain("flood");
+    expect(choice.properties.brand_id.enum).toContain("brand_ninth");
   });
 
-  it("is chosen for a fitting scene and blocked by its own negative context", async () => {
+  it("is blocked by its own negative context, and otherwise schedulable", async () => {
     const cat = await catalogueWithNinth();
-    const scenes: Scene[] = [
-      scene(0, { activity: "painting walls of the new house" }),
-      scene(1),
-      scene(2, { activity: "painting walls of the new house", negativeTags: [tag("flood")] }),
-      scene(3),
-    ];
-    const cands = [candidate("fit", 600, 0, 1), candidate("blocked", 1300, 2, 3)];
-    const matched = await matchCandidates(cands, scenes, cat.brands, config.thresholds, () => overlapRank, 2);
-    const { breaks } = selectBreaks({
-      candidates: matched,
+    const d = { brands: cat.brands, blockAll: [], minBrandFit: config.placement.minBrandFit };
+    expect(checkOption({ brandId: "brand_ninth", fit: 0.9 }, { ...d, contextsNearby: ["flood"] })).toEqual([
+      "model reported flood nearby, which Synth Ninth Paints must never be next to",
+    ]);
+    expect(checkOption({ brandId: "brand_ninth", fit: 0.9 }, { ...d, contextsNearby: ["new house"] })).toEqual([]);
+  });
+
+  it("wins a break and brings its own creative", async () => {
+    const cat = await catalogueWithNinth();
+    const { picks } = scheduleBreaks({
+      itemsByChunk: [[item(1, "brand_ninth")], [item(2, cat.brands[0].id, { fit: 0.75 })]],
       brands: cat.brands,
       durationSec: 2700,
-      pacing: config.pacing,
-      weights: config.scoring.combined,
+      maxAdLoadPct: config.placement.maxAdLoadPct,
+      weights: SCORING,
       language: "bn",
+      repeatPenalty: config.placement.brandRepeatPenalty,
+      maxBrandRepeats: 2,
     });
-
-    const fit = breaks.find((b) => b.candidateId === "fit");
-    expect(fit?.brandId).toBe("brand_ninth");
-    expect(fit?.creativeId).toBe("n_20s_bn");
-
-    const blocked = matched.find((c) => c.id === "blocked") as any;
-    expect(blocked.brands.find((d: any) => d.brandId === "brand_ninth")).toMatchObject({ eligible: false });
-    expect(breaks.find((b) => b.candidateId === "blocked")?.brandId).not.toBe("brand_ninth");
+    const ninth = picks.find((p) => p.item.brandId === "brand_ninth");
+    expect(ninth?.creative.id).toBe("n_20s_bn");
   });
 });
 
 describe("minimum brand fit", () => {
-  it("rejects a candidate whose only eligible brands are unrelated to the scene", async () => {
+  it("rejects an option the model scored below the fit floor", async () => {
     const cat = await catalogueWithNinth();
-    const scenes: Scene[] = [scene(0, { activity: "staring at a wall" }), scene(1)];
-    const matched = await matchCandidates([candidate("meh", 600, 0, 1)], scenes, cat.brands, config.thresholds, () => overlapRank, 1);
-    expect(matched[0].rejected?.reason).toMatch(/no eligible brand fits the scene/);
+    const problems = checkOption(
+      { brandId: "brand_ninth", fit: 0.4 },
+      { brands: cat.brands, blockAll: [], contextsNearby: [], minBrandFit: config.placement.minBrandFit },
+    );
+    expect(problems).toEqual([`fit 0.40 below ${config.placement.minBrandFit}`]);
   });
 });

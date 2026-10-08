@@ -1,8 +1,8 @@
-// The single source of tunable settings: env, model slugs, pacing, thresholds.
+// The single source of tunable settings: env, model slugs, placement, thresholds.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
-import type { PacingConfig, ScoreWeights, Thresholds } from "shared";
+import type { ScheduleWeights, Thresholds } from "shared";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 dotenv.config({ path: path.join(repoRoot, ".env") });
@@ -100,33 +100,29 @@ export const config = {
     sceneScaleWidth: 320,
   },
 
-  scenes: {
-    windowSec: 360,
-    overlapSec: 60,
-  },
-
-  /** How ad breaks are placed. */
+  /** How ad breaks are placed: one LLM call per transcription chunk reads that chunk's dialogue
+   *  (with the measured silences and shot cuts written in) and picks the line after which an ad
+   *  plays and the brand; code finds the exact cut, enforces the safety rules, and schedules the
+   *  best combination across every chunk. */
   placement: {
-    /** "llm": one LLM call per ad slot reads the transcript (with measured silences and shot cuts) and picks
-     *  the line and brand; code still enforces the safety rules. "rules": the older scene → candidate →
-     *  rank → select pipeline. */
-    mode: (process.env.PLACEMENT_MODE === "rules" ? "rules" : "llm") as "llm" | "rules",
-    /** Seconds of dialogue shown before and after each slot, as context. */
+    /** Seconds of dialogue shown before and after each chunk, as context. */
     contextSec: 90,
-    /** No ad in the last this-many seconds of the episode (llm mode). */
+    /** No ad in the last this-many seconds of the episode. */
     noAdLastSec: 90,
     /** Subtracted from a schedule candidate's score for every earlier use of the same brand in the
-     *  episode (llm mode): a tie-break against repeats, not a ban — see placement.ts's maxBrandRepeats
-     *  for the hard cap. With a small catalogue, some repetition across an episode is unavoidable. */
+     *  episode: a tie-break against repeats, not a ban — see placement.ts's maxBrandRepeats for the
+     *  hard cap. With a small catalogue, some repetition across an episode is unavoidable. */
     brandRepeatPenalty: 0.15,
-    /** Minimum fit to place an ad in llm mode (the rules mode uses thresholds.minBrandFit, 0.3): a
-     *  strict quality gate — an option scoring below this is never shown, whatever else is going on. */
+    /** Minimum fit to place an ad: a strict quality gate — an option scoring below this is never
+     *  shown, whatever else is going on, and it is the main thing deciding what airs at all. */
     minBrandFit: 0.7,
     /** Measured silences shorter than this are not shown to the model. */
     showSilenceMinSec: 0.5,
+    /** Total ad time stays under this share of the episode. */
+    maxAdLoadPct: 0.15,
   },
 
-  /** Final "is anyone speaking at the cut?" gate for brand-matched cuts. */
+  /** Final "is anyone speaking at the cut?" gate, run on every scheduled cut. */
   listen: {
     /** Seconds either side of the cut that must be free of speech. */
     windowSec: 1,
@@ -140,52 +136,22 @@ export const config = {
     vadModelPath: resolveFromRoot("server/models/silero_vad.onnx"),
   },
 
-  pacing: {
-    maxBreaksPerHour: 4,
-    minGapSec: 480,
-    maxAdLoadPct: 0.15,
-    noBreakFirstSec: 180,
-    noBreakLastSec: 120,
-    minSilenceMs: 700,
-  } satisfies PacingConfig,
-
   thresholds: {
-    sceneMinConfidence: 0.6,
-    negativeTagMinConfidence: 0.3,
     cutPaddingMs: 150,
-    /** Every cut must sit inside a measured ffmpeg silence window. Transcript timing alone is
-     *  never trusted to prove nobody is speaking (LLM timestamps drift; any transcriber can miss speech). */
-    requireSilenceConfirmation: true,
-    /** Second way to prove nobody is speaking: Deepgram (audio-aligned words) AND Gemini both hear
-     *  no speech for this long. Unlocks music-only transitions, where TV normally cuts to ads. */
-    allowSpeechFreeCuts: true,
+    /** Second way to prove nobody is speaking, when there is no measured silence: Scribe hears no
+     *  word for this long. Unlocks music-only transitions, where TV normally cuts to ads. */
     minSpeechFreeSec: 1.5,
-    /** Independent re-listen: Deepgram on a short clip of just the cut window. The full-chunk
-     *  pass can miss words the isolated clip reveals; disagreement = move the cut or drop it. */
-    recheckCuts: true,
-    recheckPadSec: 0.5,
-    /** Final gate: an audio LLM listens to 6s around each brand-matched cut and is asked directly
-     *  whether anyone speaks within 1s of it. Caught shouted dialogue both transcribers missed. */
+    /** Final gate: the VAD, and an audio LLM when it is unsure, listen around each scheduled cut
+     *  and answer whether anyone speaks within 1s of it. Catches speech the transcriber missed. */
     listenCheckCuts: process.env.LISTEN_CHECK_CUTS !== "false",
-    /** LLM transcript timestamps drift by a few seconds, so look this far either side of the
-     *  estimated scene change for the real pause. The cut still has to be in measured silence. */
-    boundarySearchSec: 3,
-    minGapWithoutSilenceMs: 2000,
-    chunkSeamGuardMs: 1000,
     hallucinationSilenceOverlap: 0.6,
-    /** Ranker fit below this = the brand is unrelated to the scene = don't place it. */
-    minBrandFit: 0.3,
     /** A negative context listed by more than this share of catalogue brands blocks every brand
      *  (computed from the catalogue at runtime, so it adapts when brands are added). */
     consensusNegativeShare: 0.5,
   } satisfies Thresholds,
 
-  scoring: {
-    where: { gap: 0.3, shotCut: 0.2, closure: 0.3, calm: 0.2 },
-    speechFreeGapFactor: 0.7,
-    gapSaturationSec: 3,
-    combined: { where: 0.6, brandFit: 0.4 },
-  } satisfies ScoreWeights,
+  /** How a schedule candidate's score splits between the pause it sits in and the brand's fit. */
+  scoring: { where: 0.6, brandFit: 0.4 } satisfies ScheduleWeights,
 };
 
 export type AppConfig = typeof config;

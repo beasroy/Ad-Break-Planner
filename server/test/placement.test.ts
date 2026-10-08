@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Segment } from "shared";
+import { placementJsonSchema } from "../src/prompts/placement";
 import { checkOption, cutAfterLine, freeIntervals, mergeSilences, renderLines, scheduleBreaks, type ScheduleItem } from "../src/stages/placement";
 import { brand, SCORING } from "./fixtures";
 
@@ -63,6 +64,20 @@ describe("freeIntervals", () => {
   });
 });
 
+describe("placementJsonSchema", () => {
+  // Every option reports the contexts around its OWN line, so a sensitive scene beside the main
+  // pick cannot block an alternative further away, and one beside an alternative is still caught.
+  it("asks for contexts_nearby on each choice, not once per chunk", () => {
+    const schema: any = placementJsonSchema({ lineCount: 4, brandIds: ["brand_a"], contexts: ["funeral"] });
+    expect(schema.properties.contexts_nearby).toBeUndefined();
+    expect(schema.required).not.toContain("contexts_nearby");
+    for (const choice of [schema.properties.placement.anyOf[0], schema.properties.alternatives.items]) {
+      expect(choice.required).toContain("contexts_nearby");
+      expect(choice.properties.contexts_nearby.items.enum).toEqual(["funeral"]);
+    }
+  });
+});
+
 describe("checkOption", () => {
   const brands = [brand("brand_a", ["funeral"]), brand("brand_b", ["eating"])];
   const base = { brands, blockAll: ["violence"], contextsNearby: [] as string[], minBrandFit: 0.3 };
@@ -99,7 +114,7 @@ describe("scheduleBreaks", () => {
       brands: [...brands, ...extraBrands],
       durationSec: 2700,
       maxAdLoadPct,
-      weights: SCORING.combined,
+      weights: SCORING,
       language: "bn",
       repeatPenalty,
       maxBrandRepeats: maxRepeats,

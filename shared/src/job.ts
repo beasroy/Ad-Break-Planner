@@ -1,13 +1,4 @@
-export const STAGES = [
-  "ingest",
-  "transcribe",
-  "signals",
-  "scenes",
-  "candidates",
-  "match",
-  "select",
-  "outputs",
-] as const;
+export const STAGES = ["ingest", "transcribe", "signals", "placement", "outputs"] as const;
 
 export type StageName = (typeof STAGES)[number];
 export type StageState = "pending" | "running" | "done" | "cached" | "error";
@@ -106,7 +97,7 @@ export interface ModelUsage {
 }
 
 /** Same calls as ModelUsage, grouped by pipeline stage instead of provider/model (e.g. how many
- *  calls "transcribe" made vs "match", and what each cost) — one row per stage that made any call. */
+ *  calls "transcribe" made vs "placement", and what each cost) — one row per stage that made any call. */
 export interface StageUsage {
   /** "(none)" for a call recorded outside any stage (a script, or the catalogue's brand-name check). */
   stage: string;

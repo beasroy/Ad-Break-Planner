@@ -5,12 +5,8 @@ export const ARTIFACTS = {
   ingest: "ingest.json",
   transcript: "transcript.json",
   signals: "signals.json",
-  scenes: "scenes.json",
-  candidates: "candidates.json",
-  matches: "matches.json",
   programme: "programme.json",
   placement: "placement.json",
-  breaks: "breaks.json",
   vmap: "vmap.xml",
   debug: "debug.json",
 } as const;

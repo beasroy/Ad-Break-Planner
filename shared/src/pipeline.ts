@@ -71,94 +71,31 @@ export interface Signals {
   shotCuts: number[];
 }
 
-export interface NegativeTag {
-  context: string;
-  confidence: number;
-  source: "transcript" | "keyframe";
+/**
+ * The final "is anyone speaking within ±1s of the cut?" gate. Silero VAD decides the clear cases
+ * (method "vad"); only when it is unsure is the audio LLM asked (method "llm").
+ */
+export interface ListenCheck {
+  speech: boolean;
+  method: "vad" | "llm";
+  vad: { max: number; frac: number };
+  speechNear: boolean;
+  answers?: { speechNearMark: boolean; heard: string; transcript: string }[];
+  reason: string;
 }
 
-export interface Scene {
-  id: number;
-  /** Kept (non-dropped) transcript segment ids. */
-  firstSegmentId: number;
-  lastSegmentId: number;
+/** One dialogue line, as the model was shown it. */
+export interface LineRef {
   start: number;
   end: number;
-  summary: string;
-  activity: string;
-  mood: string;
-  /** 0–1: how resolved the scene feels at its end. */
-  closure: number;
-  /** 0–1: how much unresolved tension carries past its end. */
-  tension: number;
-  /** 0–1: classification confidence. Below threshold = unclassified. */
-  confidence: number;
-  negativeTags: NegativeTag[];
+  text: string;
 }
 
-export interface WhereScore {
-  gap: number;
-  shotCut: number;
-  closure: number;
-  calm: number;
-  total: number;
-}
-
-export interface BlockReason {
-  context: string;
-  /** "brand": on this brand's own list; "consensus": listed by most brands, so it blocks all. */
-  rule: "brand" | "consensus";
-  scene: "before" | "after";
-  confidence: number;
-  source: NegativeTag["source"];
-}
-
-export interface BrandDecision {
-  brandId: string;
-  eligible: boolean;
-  blockedBy?: BlockReason[];
-  /** Set when the whole candidate is unclassified. */
-  unclassified?: boolean;
-  fit?: number;
-  reason?: string;
-}
-
-export type Rejection = { stage: "candidates" | "match" | "select"; reason: string };
-
-export interface Candidate {
-  id: string;
-  sceneBeforeId: number;
-  sceneAfterId: number;
-  /** Speech-free interval between the two scenes' speech. */
-  gap: Interval;
-  /** Sub-interval where a cut is allowed (speech-free, padded, silence-confirmed when available). */
-  safe?: Interval;
-  cutTime?: number;
-  snappedTo?: "shotCut" | "silenceMidpoint" | "gapMidpoint";
-  /** Why the cut is safe: measured silence, or both transcribers hear no speech (e.g. music only). */
-  cutBasis?: "silence" | "speechFree";
-  /** Independent re-listen of just the cut window (Deepgram on a short clip). */
-  recheck?: { heardWords: number; moved: boolean };
-  /**
-   * Final "is anyone speaking within ±1s of the cut?" gate. Silero VAD decides clear cases
-   * (method "vad"); only when it is unsure is the audio LLM asked (method "llm").
-   */
-  listenCheck?: {
-    speech: boolean;
-    method: "vad" | "llm";
-    vad: { max: number; frac: number };
-    speechNear: boolean;
-    answers?: { speechNearMark: boolean; heard: string; transcript: string }[];
-    reason: string;
-  };
-  where?: WhereScore;
-  rejected?: Rejection;
-}
-
-export interface MatchedCandidate extends Candidate {
-  brands: BrandDecision[];
-  /** Eligible brands sorted by fit desc. */
-  ranked: { brandId: string; fit: number; reason: string }[];
+/** The dialogue around a cut: the line the ad follows, and the one that resumes after it
+ *  (absent when the chosen line is the last one in view). Enough to read a decision back. */
+export interface CutDialogue {
+  after: LineRef;
+  before?: LineRef;
 }
 
 export interface Break {
@@ -171,6 +108,8 @@ export interface Break {
   fit: number;
   combinedScore: number;
   reason: string;
+  /** What is actually being said either side of the cut. */
+  dialogue?: CutDialogue;
 }
 
 export interface SelectionLog {
@@ -187,24 +126,20 @@ export interface ProgrammeContext {
 }
 
 export interface DebugReport {
-  /** LLM placement mode: a plain-language account of how the ads were placed, and the settings that were used. */
-  mode?: "llm";
-  explanation?: string[];
-  settingsUsed?: Record<string, unknown>;
+  /** A plain-language account of how the ads were placed, and the settings that were used. */
+  explanation: string[];
+  settingsUsed: Record<string, unknown>;
   jobId: string;
   programme?: ProgrammeContext;
   fileHash: string;
   meta: VideoMeta;
   config: unknown;
   transcriptStats: { segments: number; dropped: number; rawFieldsSeen: string[] };
-  /** Rules mode only. */
-  scenes?: Scene[];
-  candidates?: (Candidate | MatchedCandidate)[];
-  /** One entry per candidate (rules mode) or per chunk (LLM mode). */
+  /** One entry per chunk. */
   selection: SelectionLog[];
   breaks: Break[];
-  /** LLM placement mode: every chunk, what the model was shown, what it answered, and what code accepted or rejected. */
-  placement?: unknown;
+  /** Every chunk: what the model was shown, what it answered, and what code accepted or rejected. */
+  placement: unknown;
   /** Every API call recorded for this video, across every attempt (including earlier failed retries —
    *  it's money already spent), and what it cost. Omitted for a CLI/script run that never opened the
    *  database (npm run stage, playground). */

@@ -2,10 +2,10 @@
 // Usage:
 //   npm run stage -w server -- add <path/to/video>           copy a video into /data/{hash}/ and print its id
 //   npm run stage -w server -- <stage|all> <hash-or-prefix> [--force]
-// Stages: ingest transcribe signals scenes candidates match select outputs
+// Stages: ingest transcribe signals placement outputs
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Candidate, IngestArtifact, MatchedCandidate, Scene, Signals, Transcript } from "shared";
+import type { Break, IngestArtifact, SelectionLog, Signals, Transcript } from "shared";
 import { config } from "../src/config";
 import { openCatalogue } from "../src/catalogue/store";
 import { ARTIFACTS, exists, readJson, writeJson } from "../src/lib/artifacts";
@@ -15,10 +15,7 @@ import { makeContext } from "../src/stages/context";
 import { runIngest } from "../src/stages/ingest";
 import { runSignals } from "../src/stages/signals";
 import { runTranscribe, transcribeChunks } from "../src/stages/transcribe";
-import { runScenes } from "../src/stages/scenes";
-import { runCandidates } from "../src/stages/candidates";
-import { runMatch } from "../src/stages/match";
-import { runSelect } from "../src/stages/select";
+import { runPlacement } from "../src/stages/placement";
 import { runOutputs } from "../src/stages/outputs";
 
 const [stage, target, ...flags] = process.argv.slice(2);
@@ -76,29 +73,13 @@ switch (stage) {
     await runTranscribe(ctx, ingest, raw, await need<Signals>(ARTIFACTS.signals));
     break;
   }
-  case "scenes":
-    await runScenes(ctx, await need<Transcript>(ARTIFACTS.transcript));
-    break;
-  case "candidates":
-    await runCandidates(
+  case "placement":
+    await runPlacement(
       ctx,
-      await need<Scene[]>(ARTIFACTS.scenes),
+      await need<IngestArtifact>(ARTIFACTS.ingest),
       await need<Transcript>(ARTIFACTS.transcript),
       await need<Signals>(ARTIFACTS.signals),
-      await need<IngestArtifact>(ARTIFACTS.ingest),
     );
-    break;
-  case "match":
-    await runMatch(
-      ctx,
-      await need<Candidate[]>(ARTIFACTS.candidates),
-      await need<Scene[]>(ARTIFACTS.scenes),
-      await need<IngestArtifact>(ARTIFACTS.ingest),
-      (await need<Transcript>(ARTIFACTS.transcript)).speech ?? [],
-    );
-    break;
-  case "select":
-    await runSelect(ctx, await need<(Candidate | MatchedCandidate)[]>(ARTIFACTS.matches), (await need<IngestArtifact>(ARTIFACTS.ingest)).meta.durationSec);
     break;
   case "outputs":
     await runOutputs(
@@ -106,9 +87,7 @@ switch (stage) {
       hash,
       await need<IngestArtifact>(ARTIFACTS.ingest),
       await need<Transcript>(ARTIFACTS.transcript),
-      await need<Scene[]>(ARTIFACTS.scenes),
-      await need<(Candidate | MatchedCandidate)[]>(ARTIFACTS.matches),
-      await need(ARTIFACTS.breaks),
+      await need<{ breaks: Break[]; log: SelectionLog[]; slots: unknown[] }>(ARTIFACTS.placement),
     );
     break;
   default:

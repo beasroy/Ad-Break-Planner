@@ -1,26 +1,18 @@
 import { z } from "zod";
-import type { Scene } from "shared";
 
-export const PROGRAMME_PROMPT_VERSION = 1;
+/** The episode summary ("story so far") shown to every placement call as background. */
+export const STORY_PROMPT_VERSION = 1;
 
-export const programmeSystemPrompt = [
-  "You read the scene-by-scene summary of one Bengali TV episode and describe the programme as a whole.",
+export const storySystemPrompt = [
+  "You read the dialogue (with timestamps) of one Bengali TV episode and describe the programme as a whole.",
   "summary: one English sentence on what the programme is about.",
   "genre: a few words (e.g. 'food travel show', 'family drama', 'crime thriller').",
-  "recurring_contexts: up to 8 short phrases for activities, settings or objects that recur across many scenes (e.g. 'cooking', 'eating', 'travel', 'phone calls').",
+  "recurring_contexts: up to 8 short phrases for activities, settings or objects that recur across the episode (e.g. 'cooking', 'eating', 'travel', 'phone calls').",
 ].join("\n");
 
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
-/** LLM placement mode: the same summary, read straight from the dialogue instead of the scene list. */
-export const STORY_PROMPT_VERSION = 1;
-
-export const storySystemPrompt = programmeSystemPrompt.replace("scene-by-scene summary", "dialogue (with timestamps)").replace("across many scenes", "across the episode");
-
 export const storyUserPrompt = (lines: { start: number; text: string }[]) => lines.map((l) => `[${mmss(l.start)}] ${l.text}`).join("\n");
-
-export const programmeUserPrompt = (scenes: Scene[]) =>
-  scenes.map((s) => `[${mmss(s.start)}] ${s.activity} — ${s.summary}`).join("\n");
 
 export const programmeJsonSchema = {
   type: "object",

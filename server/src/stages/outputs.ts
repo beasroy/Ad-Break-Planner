@@ -1,15 +1,5 @@
-// Stage 8: vmap.xml + debug.json.
-import type {
-  Break,
-  Candidate,
-  DebugReport,
-  IngestArtifact,
-  MatchedCandidate,
-  ProgrammeContext,
-  Scene,
-  SelectionLog,
-  Transcript,
-} from "shared";
+// Stage 5: vmap.xml + debug.json.
+import type { Break, DebugReport, IngestArtifact, ProgrammeContext, SelectionLog, Transcript } from "shared";
 import { maybeRepo } from "../db";
 import { ARTIFACTS, exists, readJson, writeFileAtomic, writeJson } from "../lib/artifacts";
 import { buildVmap } from "../xml/vmap";
@@ -24,29 +14,28 @@ function costSummary(jobId: string): DebugReport["costSummary"] {
   return { totalUsd: audit.totals.costUsd, totalCalls: audit.totals.calls, totalErrors: audit.totals.errors, byStage: audit.byStage, byKind: audit.byKind };
 }
 
-/** Plain-language account of an LLM-mode run, with this run's actual settings filled in. */
-function llmExplanation(ctx: StageContext, chunks: number, durationSec: number): string[] {
-  const { placement: p, pacing, listen: l, scoring } = ctx.config;
+/** Plain-language account of a run, with this run's actual settings filled in. */
+function explain(ctx: StageContext, chunks: number, durationSec: number): string[] {
+  const { placement: p, listen: l, scoring, thresholds: t } = ctx.config;
   const repeatCap = maxBrandRepeats(durationSec);
   return [
-    `Placement mode: LLM. The episode was split into ${chunks} chunks (the ~2 minute audio pieces used for transcription). Every chunk was called independently and in parallel — none was told what any other chunk decided. Each call read that chunk's dialogue plus ${p.contextSec}s of dialogue before and after it, with the measured silences (${p.showSilenceMinSec}s or longer) and shot cuts written between the lines, and proposed a best line-and-brand pick plus up to 2 alternatives.`,
-    `For every option the model proposed, code found the exact cut time — inside a measured silence after that line (on a shot cut if one falls in it, else its middle), or, if there is none, in the first stretch of the pause with no transcribed word for at least ${ctx.config.thresholds.minSpeechFreeSec}s — and rejected it outright if none of the contexts it reported as nearby is on the brand's never-next-to list or the list that blocks every brand, and if its fit is below ${p.minBrandFit} — a strict floor: fit is the main gate on what airs at all in this mode.`,
-    `Once every chunk had answered, code chose the highest total quality combination across all of them (${Math.round(scoring.combined.where * 100)}% how good the pause is, ${Math.round(scoring.combined.brandFit * 100)}% brand fit), subject to total ad time under ${Math.round(pacing.maxAdLoadPct * 100)}% of the episode and never the same brand on two ads next to each other. There is no minimum gap between ads and no target ad count: any two ads clearing the ${p.minBrandFit} fit floor can sit as close together as the content allows, and there is no preference for more ads over fewer either — a chunk with no eligible candidate is simply left empty. No ad plays in the last ${p.noAdLastSec}s of the episode, and none in the first slot either — there is no no-break zone at the start.`,
+    `The episode was split into ${chunks} chunks (the ~2 minute audio pieces used for transcription). Every chunk was called independently and in parallel — none was told what any other chunk decided. Each call read that chunk's dialogue plus ${p.contextSec}s of dialogue before and after it, with the measured silences (${p.showSilenceMinSec}s or longer) and shot cuts written between the lines, and proposed a best line-and-brand pick plus up to 2 alternatives.`,
+    `For every option the model proposed, code found the exact cut time — inside a measured silence after that line (on a shot cut if one falls in it, else its middle), or, if there is none, in the first stretch of the pause with no transcribed word for at least ${t.minSpeechFreeSec}s — and rejected it outright if any of the contexts it reported as nearby is on the brand's never-next-to list or the list that blocks every brand, or if its fit is below ${p.minBrandFit} — a strict floor: fit is the main gate on what airs at all.`,
+    `Once every chunk had answered, code chose the highest total quality combination across all of them (${Math.round(scoring.where * 100)}% how good the pause is, ${Math.round(scoring.brandFit * 100)}% brand fit), subject to total ad time under ${Math.round(p.maxAdLoadPct * 100)}% of the episode and never the same brand on two ads next to each other. There is no minimum gap between ads and no target ad count: any two ads clearing the ${p.minBrandFit} fit floor can sit as close together as the content allows, and there is no preference for more ads over fewer either — a chunk with no eligible candidate is simply left empty. No ad plays in the last ${p.noAdLastSec}s of the episode, and none in the first slot either — there is no no-break zone at the start.`,
     `A brand can repeat across the episode, but it costs ${p.brandRepeatPenalty} off a candidate's score for every earlier use of that brand — a tie-break, not a ban, so a repeat still airs when nothing fresher scores close to it — and it is capped outright at ${repeatCap} airings this episode (this length gets ${repeatCap}; the cap only rises to 3 past about 75 minutes). With this catalogue's ${ctx.catalogue.brands.length} brands, some repetition across a longer episode is expected.`,
     `Last, every chosen cut was checked for speech (voice activity ${l.vadSpeechMin} or more rejects it, between ${l.vadQuietMax} and ${l.vadSpeechMin} the audio is re-checked by an LLM). A cut that fails is dropped and the schedule is redrawn without it.`,
-    "Not used in this mode: scene analysis, candidate cut points, the brand ranker, breaks per hour, the first/last no-break zones, the 700ms minimum silence, and pacing.minGapSec / thresholds.minBrandFit (the rules pipeline's own, separate gap and fit floor). They belong to the older rules pipeline (PLACEMENT_MODE=rules), which is why they are left out of this file.",
-    "Reading this file: `breaks` are the ads placed. `selection` has one line per chunk with the outcome and reason. `placement.chunks` has, per chunk, the exact prompt the model saw, its answer, and every option it proposed with the cut time, how the cut was found (silence / speechFree), and why it was accepted or rejected — including options that passed every content check but lost to a better schedule elsewhere, or would have repeated a brand past its cap. `settingsUsed` lists the values above. `costSummary` is every API call this video has ever made (across every attempt, including earlier retries) with what it cost, by pipeline stage and by what the call was for.",
+    "Reading this file: `breaks` are the ads placed, each with `dialogue` — the line the ad follows and the one that resumes after it, so you can read the moment without cross-referencing anything. `selection` has one line per chunk with the outcome and reason. `placement.chunks` has, per chunk, the exact prompt the model saw, its answer, and every option it proposed with that same `dialogue`, the sensitive contexts the model reported at that option's own line (`contextsNearby`), the cut time, how the cut was found (silence / speechFree), and why it was accepted or rejected — including options that passed every content check but lost to a better schedule elsewhere, or would have repeated a brand past its cap. `settingsUsed` lists the values above. `costSummary` is every API call this video has ever made (across every attempt, including earlier retries) with what it cost, by pipeline stage and by what the call was for.",
   ];
 }
 
-function llmSettings(ctx: StageContext, durationSec: number): Record<string, unknown> {
-  const { placement: p, pacing, thresholds: t, listen: l, openrouter, scoring } = ctx.config;
+function settingsUsed(ctx: StageContext, durationSec: number): Record<string, unknown> {
+  const { placement: p, thresholds: t, listen: l, openrouter, scoring } = ctx.config;
   return {
     placementModel: openrouter.reasonModel,
     minBrandFit: p.minBrandFit,
     noAdLastSec: p.noAdLastSec,
-    maxAdLoadPct: pacing.maxAdLoadPct,
-    scheduleScoreWeights: scoring.combined,
+    maxAdLoadPct: p.maxAdLoadPct,
+    scheduleScoreWeights: scoring,
     brandRepeatPenalty: p.brandRepeatPenalty,
     maxBrandRepeatsThisEpisode: maxBrandRepeats(durationSec),
     contextSecEitherSide: p.contextSec,
@@ -64,14 +53,11 @@ export async function runOutputs(
   fileHash: string,
   ingest: IngestArtifact,
   transcript: Transcript,
-  scenes: Scene[],
-  matched: (Candidate | MatchedCandidate)[],
-  selection: { breaks: Break[]; log: SelectionLog[] },
-  /** LLM placement mode: per-slot prompts, answers and checks. */
-  placement?: unknown,
+  /** The placement stage's result: the ads, one log line per chunk, and the per-chunk detail. */
+  plan: { breaks: Break[]; log: SelectionLog[]; slots: unknown[] },
 ) {
   // Always regenerated: cheap, and depends on publicBaseUrl.
-  await writeFileAtomic(artifactPath(ctx, ARTIFACTS.vmap), buildVmap(selection.breaks, ctx.config.publicBaseUrl));
+  await writeFileAtomic(artifactPath(ctx, ARTIFACTS.vmap), buildVmap(plan.breaks, ctx.config.publicBaseUrl));
 
   const { apiKey: _omit, ...openrouter } = ctx.config.openrouter;
   const { apiKey: _omitSc, ...scribe } = ctx.config.scribe;
@@ -79,7 +65,9 @@ export async function runOutputs(
   const programme = (await exists(programmePath))
     ? (await readJson<{ data: ProgrammeContext }>(programmePath)).data
     : undefined;
-  const base = {
+  const debug: DebugReport = {
+    explanation: explain(ctx, plan.slots.length, ingest.meta.durationSec),
+    settingsUsed: settingsUsed(ctx, ingest.meta.durationSec),
     jobId: ctx.jobId,
     fileHash,
     meta: ingest.meta,
@@ -89,27 +77,13 @@ export async function runOutputs(
       dropped: transcript.segments.filter((s) => s.dropped).length,
       rawFieldsSeen: transcript.rawFieldsSeen,
     },
-    selection: selection.log,
-    breaks: selection.breaks,
+    // Only the settings that took part in the run.
+    config: { openrouter, scribe, contentLanguage: ctx.config.contentLanguage, catalogueHash: ctx.catalogue.hash },
+    selection: plan.log,
+    breaks: plan.breaks,
+    placement: { chunks: plan.slots },
     costSummary: costSummary(ctx.jobId),
   };
-  const debug: DebugReport =
-    placement === undefined
-      ? {
-          ...base,
-          config: { ...ctx.config, openrouter, scribe, catalogueHash: ctx.catalogue.hash },
-          scenes,
-          candidates: matched,
-        }
-      : {
-          // LLM mode: only the settings that took part, and a plain account of how the ads were placed.
-          mode: "llm",
-          explanation: llmExplanation(ctx, (placement as unknown[]).length, ingest.meta.durationSec),
-          settingsUsed: llmSettings(ctx, ingest.meta.durationSec),
-          ...base,
-          config: { openrouter, scribe, contentLanguage: ctx.config.contentLanguage, catalogueHash: ctx.catalogue.hash },
-          placement: { mode: "llm", chunks: placement },
-        };
   await writeJson(artifactPath(ctx, ARTIFACTS.debug), debug);
-  ctx.log(`outputs: vmap.xml + debug.json written (${selection.breaks.length} breaks)`);
+  ctx.log(`outputs: vmap.xml + debug.json written (${plan.breaks.length} breaks)`);
 }

@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { config } from "../src/config";
 import { vadAround, windowScore } from "../src/lib/vad";
-import { answerHasSpeech, speechIntervalNear, llmVerdict, vadGate } from "../src/stages/match/listen";
+import { answerHasSpeech, speechIntervalNear, llmVerdict, vadGate } from "../src/stages/listen/rules";
 
 const T = { windowSec: 1, vadSpeechMin: 0.9, vadQuietMax: 0.1 };
 const quiet = { speech_near_mark: false, heard_at_mark: "music", transcript: "" };

@@ -4,14 +4,11 @@ export const STAGE_LABELS: Record<StageName, string> = {
   ingest: "Extract audio",
   transcribe: "Transcribe dialogue",
   signals: "Detect silences & shot cuts",
-  scenes: "Understand scenes",
-  candidates: "Find safe cut points",
-  match: "Match brands",
-  select: "Apply pacing rules",
+  placement: "Place ad breaks",
   outputs: "Write VMAP & report",
 };
 
-/** What a running job is doing now, e.g. { label: "Transcribe dialogue", step: 2, total: 8 }. */
+/** What a running job is doing now, e.g. { label: "Transcribe dialogue", step: 2, total: 5 }. */
 export function currentStage(job: Job): { label: string; step: number; total: number } | undefined {
   const i = STAGES.findIndex((s) => job.stages[s]?.state === "running");
   if (i < 0) return undefined;

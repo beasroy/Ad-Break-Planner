@@ -7,13 +7,9 @@ import { ARTIFACTS } from "../lib/artifacts";
 import { withCallContext } from "../lib/callContext";
 import { PermanentError } from "../lib/errors";
 import { makeContext, type StageContext } from "../stages/context";
-import { runCandidates } from "../stages/candidates";
 import { runIngest } from "../stages/ingest";
-import { runMatch } from "../stages/match";
 import { runOutputs } from "../stages/outputs";
 import { runPlacement } from "../stages/placement";
-import { runScenes } from "../stages/scenes";
-import { runSelect } from "../stages/select";
 import { runSignals } from "../stages/signals";
 import { runTranscribe, transcribeChunks } from "../stages/transcribe";
 
@@ -63,10 +59,7 @@ export async function runPipeline(
   const artifactFor: Partial<Record<StageName, string>> = {
     ingest: ARTIFACTS.ingest,
     signals: ARTIFACTS.signals,
-    scenes: ARTIFACTS.scenes,
-    candidates: ARTIFACTS.candidates,
-    match: ARTIFACTS.matches,
-    select: ARTIFACTS.breaks,
+    placement: ARTIFACTS.placement,
   };
   const mtime = async (name: StageName) => {
     const art = artifactFor[name];
@@ -103,21 +96,9 @@ export async function runPipeline(
   ]);
   const transcript = await runTranscribe(ctx, ingest, raw, signals);
 
-  if (ctx.config.placement.mode === "llm") {
-    // One LLM call per transcription chunk picks line + brand; code enforces the safety rules (see
-    // stages/placement.ts). Its work spans what the rules mode splits into scenes / candidates / match / select.
-    await stage("scenes", async () => undefined);
-    await stage("candidates", async () => undefined);
-    const plan = await stage("match", () => runPlacement(ctx, ingest, transcript, signals));
-    await stage("select", async () => undefined);
-    await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, [], [], plan, plan.slots));
-    return { durationSec: ingest.meta.durationSec, breakCount: plan.breaks.length, catalogueHash: catalogue.hash };
-  }
-
-  const scenes = await stage("scenes", () => runScenes(ctx, transcript));
-  const candidates = await stage("candidates", () => runCandidates(ctx, scenes, transcript, signals, ingest));
-  const matched = await stage("match", () => runMatch(ctx, candidates, scenes, ingest, transcript.speech ?? []));
-  const selection = await stage("select", () => runSelect(ctx, matched, ingest.meta.durationSec));
-  await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, scenes, matched, selection));
-  return { durationSec: ingest.meta.durationSec, breakCount: selection.breaks.length, catalogueHash: catalogue.hash };
+  // One LLM call per transcription chunk picks line + brand; code finds the cut, enforces the
+  // safety rules and schedules the best combination (see stages/placement.ts).
+  const plan = await stage("placement", () => runPlacement(ctx, ingest, transcript, signals));
+  await stage("outputs", () => runOutputs(ctx, job.fileHash, ingest, transcript, plan));
+  return { durationSec: ingest.meta.durationSec, breakCount: plan.breaks.length, catalogueHash: catalogue.hash };
 }

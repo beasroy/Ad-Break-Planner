@@ -79,7 +79,7 @@ export default function UploadPage() {
           </span>
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Upload an episode</h1>
           <p className="max-w-2xl text-sm leading-6 text-muted">
-            The pipeline finds safe, natural ad breaks, applies pacing rules, and matches brands from the catalogue.
+            The pipeline finds safe, natural ad breaks and matches brands from the catalogue.
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-xs text-muted">

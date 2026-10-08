@@ -4,12 +4,11 @@ This project analyzes long-form video and suggests safe, context-aware mid-roll 
 combines transcript, audio and scene signals with a brand catalogue so ads land at natural pauses instead of cutting
 through important dialogue or emotional moments.
 
-This README explains how the current LLM-driven placement pipeline works.
+This README explains how the LLM-driven placement pipeline works.
 
 ## LLM ad placement
 
-How the ad-break planner decides where mid-roll ads go when `placement.mode` is `"llm"` (the default; the older
-pipeline is not covered here).
+How the ad-break planner decides where mid-roll ads go.
 
 The idea: **the model makes the judgement call, code makes every decision that can be measured or must be safe.**
 The model reads dialogue and picks a line and a brand. Code picks the exact cut time and rejects anything that breaks a rule.
@@ -17,13 +16,12 @@ When in doubt, no ad is placed: a missing ad is better than a bad one.
 
 Code: [server/src/stages/placement.ts](server/src/stages/placement.ts) · prompt: [server/src/prompts/placement.ts](server/src/prompts/placement.ts) · settings: [server/src/config.ts](server/src/config.ts)
 
-## What runs in this mode
+## What runs
 
-| Pipeline step | LLM mode |
+| Pipeline step | What it does |
 |---|---|
-| Extract audio, transcribe dialogue, detect silences and shot cuts | Run as normal. Their output is the input to placement. |
-| Understand scenes, find cut points, apply pacing rules | **Not run** (shown as instantly done). Their work is done inside placement. |
-| Match brands | `runPlacement`: gathers every chunk's candidates, schedules the best combination, verifies it — the whole algorithm below. |
+| Extract audio, transcribe dialogue, detect silences and shot cuts | Their output is the input to placement. |
+| Place ad breaks | `runPlacement`: gathers every chunk's candidates, schedules the best combination, verifies it — the whole algorithm below. |
 | Write VMAP and report | Writes `vmap.xml` and `debug.json`. |
 
 ## The algorithm
@@ -33,7 +31,7 @@ Placement runs in three phases: gather every chunk's candidates (in parallel, ea
 1. **Episode summary.** One LLM call reads the whole dialogue and writes a short "story so far" (summary, genre, recurring contexts). It is shown to every placement call as background only. Cached in `programme.json`. If it fails, placement carries on without it.
 2. **Chunks.** The episode is split into the same 120 s pieces used for transcription. Each chunk is one placement window. A chunk with no dialogue in it is skipped, with no LLM call. Every other chunk is called, whatever it's near — chunks never skip each other for being close together, and there is no minimum gap enforced anywhere later either.
 3. **One LLM call per chunk, all in parallel.** No chunk is told what any other chunk decided — not the previous ad's brand, not which brands have already been used — because at call time that isn't decided yet either. Each call is shown the story, the full brand catalogue, then three blocks of numbered dialogue lines: the 90 s before the window (`P1…`, context only), the window's own lines (`1…`, ads only after one of these) and the 90 s after (`N1…`, context only). Measured **silences** (0.5 s or longer) and **shot cuts** are written between the lines as unnumbered markers.
-4. **The answer** (strict JSON): a best `placement` (line, brand, fit 0–1, reason) or `null`, up to 2 `alternatives` (asked to be different brands, so code has real choices later), the `contexts_nearby` it saw around the cut, and `why_not_others`.
+4. **The answer** (strict JSON): a best `placement` (line, brand, fit 0–1, reason, `contexts_nearby`) or `null`, up to 2 `alternatives` in the same shape (asked to be different brands, so code has real choices later), and `why_not_others`. **Every choice carries its own `contexts_nearby`**, reported at its own line — the alternatives sit at different moments, so one list per chunk would both over-block a clean alternative and miss a sensitive scene next to one.
 5. **Code checks every option on its own merits** (see below) — content only, nothing that depends on other chunks. Every option that passes becomes a schedulable candidate; a chunk can contribute more than one (its pick and any alternative that also passes).
 6. **Scheduling.** Once every chunk has answered, code picks the combination of at most one candidate per chunk with the highest total quality score, subject to the ad-load budget and never the same brand on two ads next to each other (see "Scheduling" below). There is no minimum gap between ads and no target ad count — the fit floor is the only thing gating what plays.
 7. **Verification.** Every scheduled cut is checked for speech (see below). A cut that fails is dropped and the schedule is redrawn without it, which can let a different chunk's candidate take that slot instead.
@@ -45,8 +43,8 @@ Run in this order; the first failure rejects the option. None of these depend on
 1. The line exists in this chunk's lines.
 2. **A cut time can be found** (see below).
 3. **The cut is not in the last 90 s** of the episode.
-4. **Negative contexts.** None of the `contexts_nearby` the model reported is on the chosen brand's `negativeContexts`, or on the "blocks every brand" list.
-5. **Fit** is at least `0.7` — a strict gate: this is the main thing deciding what airs at all in this mode.
+4. **Negative contexts.** None of the `contexts_nearby` the model reported *for this option's own line* is on the chosen brand's `negativeContexts`, or on the "blocks every brand" list.
+5. **Fit** is at least `0.7` — a strict gate: this is the main thing deciding what airs at all.
 
 An option that passes becomes a candidate for scheduling. If the model's call fails, the chunk contributes no candidates.
 
@@ -62,7 +60,7 @@ There is **no minimum gap between ads** and **no target ad count**: two candidat
 
 The `0.15` repeat penalty is a tie-break, not a ban: a second use of a brand only loses to a fresher one when the fresher one is genuinely close in quality; a repeat that clearly fits better than any unused brand nearby still airs. With this catalogue's small brand count, some repetition across a longer episode is expected and accepted — the penalty and the cap exist to bound it, not eliminate it.
 
-Exhaustive search over chunks in time order (small n; the same technique, and the same safety valve, as the rules pipeline's `selectBreaks`).
+Exhaustive search over chunks in time order (small n, with a node cap as a safety valve for pathological inputs).
 
 ### Verification (phase 3: nobody speaking at the cut)
 
@@ -107,7 +105,7 @@ For the accepted brand, the **longest creative that still fits the remaining ad 
 8. Judge only from dialogue and the measurements; do not assume anything that is not there.
 9. If nothing passes every rule, place no ad.
 
-The model must report `contexts_nearby` honestly, because code relies on it (see assumptions).
+The model must report each choice's `contexts_nearby` honestly, and judge it at that choice's own line, because code relies on it (see assumptions).
 
 ## Settings
 
@@ -115,10 +113,10 @@ All in [server/src/config.ts](server/src/config.ts).
 
 | Setting | Value | Meaning |
 |---|---|---|
-| `placement.minBrandFit` | 0.7 | The fit floor for this mode (see "the rules mode uses a different fit floor" below) — a strict quality gate, not a tie-break. |
+| `placement.minBrandFit` | 0.7 | The fit floor — a strict quality gate, not a tie-break. |
 | `placement.noAdLastSec` | 90 | No ad in the last 90 s of the episode. |
-| `pacing.maxAdLoadPct` | 0.15 | Total ad time stays under 15% of the episode. |
-| `scoring.combined` | `{ where: 0.6, brandFit: 0.4 }` | How a candidate's schedule score is weighed: pause quality vs brand fit. |
+| `placement.maxAdLoadPct` | 0.15 | Total ad time stays under 15% of the episode. |
+| `scoring` | `{ where: 0.6, brandFit: 0.4 }` | How a candidate's schedule score is weighed: pause quality vs brand fit. |
 | `placement.brandRepeatPenalty` | 0.15 | Subtracted from the score for every earlier use of a candidate's brand in the episode. |
 | `maxBrandRepeats(durationSec)` | 2 (3 past ~75 min) | Hard cap on how many times one brand may air in an episode; not a config value, a function of the episode's length (`placement.ts`). |
 | `placement.contextSec` | 90 | Dialogue shown before and after each chunk. |
@@ -139,17 +137,17 @@ All in [server/src/config.ts](server/src/config.ts).
 | `scribe.uttSplitSec` | 0.5 | Pause that splits Scribe's words into separate lines. |
 | `scribe.audioEventsAreSpeech` | true | `[music]`/`[crying]` spans block cuts like words do. |
 
-There is **no minimum gap between ads**, **no target ad count**, **no cap on the number of ads**, and no no-break zone at the start of the episode. `pacing.maxBreaksPerHour`, `noBreakFirstSec`, `noBreakLastSec`, `minSilenceMs` and `pacing.minGapSec` belong to the legacy pipeline and are ignored here — as is `thresholds.minBrandFit` (0.3): the rules mode uses that one, LLM mode uses its own, much stricter `placement.minBrandFit` (0.7) instead.
+There is **no minimum gap between ads**, **no target ad count**, **no cap on the number of ads**, and no no-break zone at the start of the episode. Nothing spaces ads out or pushes their count up or down: `placement.minBrandFit` is the only thing deciding how many there are.
 
 ## Assumptions
 
 - **Every chunk is judged only on its own merits, and every chunk is called.** Since chunks run in parallel with no fixed order between them, none can be told what an earlier or later one decided — so nothing is skipped upfront for being "too close" to another chunk's ad. This costs one LLM call per chunk with dialogue, every run, not just the ones that end up used; the trade-off is that a schedule can compare every chunk's quality before deciding, instead of locking in whichever came first.
-- **The fit floor, not spacing, is what limits how many ads there are.** There is no minimum gap between ads and no target ad count in this mode — two good candidates can sit as close together as the content allows, and a thin episode with few high-fit moments simply gets few ads, with no floor pushing a weaker candidate in to compensate. The strictness lives entirely in the `0.7` fit floor: raise it and fewer, better-fitting ads air; lower it and more do.
+- **The fit floor, not spacing, is what limits how many ads there are.** There is no minimum gap between ads and no target ad count — two good candidates can sit as close together as the content allows, and a thin episode with few high-fit moments simply gets few ads, with no floor pushing a weaker candidate in to compensate. The strictness lives entirely in the `0.7` fit floor: raise it and fewer, better-fitting ads air; lower it and more do.
 - **A brand may repeat, but is nudged and then capped, not banned outright.** With only a handful of brands in the catalogue, refusing all repetition would leave good ad moments empty. Instead a repeat costs a small score penalty (a tie-break: a fresher brand close in quality wins, but a repeat that is clearly the better fit still airs), and a hard cap stops one brand from dominating a long episode regardless of how well it scores throughout. Every repeat still obeys the same-brand-adjacent ban, the negative-context checks and every other rule.
 - **Audio measurements beat transcript timings.** Line times are estimates (many come from an LLM transcript and can be off by up to a second or more). Silences and shot cuts are measured from the audio and picture, so the model is told to trust them, and cuts are placed in them.
 - **Transcribed words count as speech, and so do audio events.** ElevenLabs Scribe is the only transcriber: it returns word-level timings (capped at 2 s from each word's start, which bounds a rare over-long span) and tags for sound it can name but has no words for — `[music]`, `[crying]`, `[screaming]`. Those tagged spans are speech walls too, because a cut inside a song or someone crying is as wrong as one mid-sentence. Lines flagged as hallucinations by the transcript stage are left out of the dialogue.
 - **One transcriber means one point of failure.** If Scribe fails on a chunk the stage fails rather than carrying on, because a hole in the transcript would look exactly like quiet and invite a cut there. Measured against the previous Deepgram+Gemini pair on five full episodes, Scribe's word timings drift ~0.1 s (Gemini: 0.8–1.4 s), it puts 3–5× fewer words inside measured silence, and it misses 5.3× less speech than Deepgram did — but it does miss some, mostly singing and wailing, which is why audio events are walls and the VAD gate below is independent of the transcript.
-- **Safety depends on the model reporting `contexts_nearby` honestly.** There is no separate scene analysis in this mode; the negative-context and block-all checks compare the model's own report with the brand lists. A context the model fails to report is not caught.
+- **Safety depends on the model reporting `contexts_nearby` honestly.** There is no separate scene analysis; the negative-context and block-all checks compare the model's own report with the brand lists. A context the model fails to report is not caught. Each option reports its own list at its own line, so a sensitive scene beside the main pick no longer blocks an alternative a minute away, and one beside an alternative is caught rather than ignored.
 - **The "blocks every brand" list is computed from the catalogue** (contexts on more than half the brands' lists), so it changes when brands are added.
 - **Only one ad per chunk** — but there is no minimum spacing between two chunks' ads; adjacent chunks can each get one.
 - **The same brand may not play on two ads next to each other in the final schedule** — a hard rule enforced by the scheduler, not a preference. "Next to each other" means the previous and next *scheduled* ad; a chunk that contributed nothing in between doesn't break the adjacency. A brand can still repeat further apart, subject to the penalty and cap above.
@@ -160,10 +158,10 @@ There is **no minimum gap between ads**, **no target ad count**, **no cap on the
 
 ## Outputs
 
-- `placement.json`: the cached result: the ads placed, one selected or rejected line per chunk, and per-chunk detail.
+- `placement.json`: the cached result: the ads placed, one selected or rejected line per chunk, and per-chunk detail. Every option carries the `dialogue` either side of its cut (the line the ad would follow, and the one that resumes) and the `contextsNearby` the model reported at that option's own line.
 - `placement-llm.jsonl`: every LLM request and response for the run.
 - `programme.json`: the episode summary.
-- `vmap.xml` and `debug.json`. In this mode `debug.json` begins with a plain-language explanation of the run and `settingsUsed`, then lists `breaks`, `selection` (one line per chunk) and `placement.chunks` (per chunk: the exact prompt, the model's answer, every option with its cut time, how the cut was found (`silence` or `speechFree`) and why it was accepted or rejected — including an option that passed every content check but lost to a better schedule elsewhere). It also carries `costSummary`: every API call this video has made across every attempt (so a failed retry's cost isn't lost), with the total, and a breakdown both by pipeline stage and by what the call was for (e.g. every "placement chunk" call counted as one row, whatever chunk number). Present only when running through the app itself — a `npm run stage`/playground run never opens the database, so it's left out there. The same numbers, live-updating while a job runs, are on its page in the web app, under "API cost".
+- `vmap.xml` and `debug.json`. `debug.json` begins with a plain-language explanation of the run and `settingsUsed`, then lists `breaks` (each with the `dialogue` either side of its cut), `selection` (one line per chunk) and `placement.chunks` (per chunk: the exact prompt, the model's answer, every option with its `dialogue`, its `contextsNearby`, its cut time, how the cut was found (`silence` or `speechFree`) and why it was accepted or rejected — including an option that passed every content check but lost to a better schedule elsewhere). It also carries `costSummary`: every API call this video has made across every attempt (so a failed retry's cost isn't lost), with the total, and a breakdown both by pipeline stage and by what the call was for (e.g. every "placement chunk" call counted as one row, whatever chunk number). Present only when running through the app itself — a `npm run stage`/playground run never opens the database, so it's left out there. The same numbers, live-updating while a job runs, are on its page in the web app, under "API cost".
 
 ## Testing placement without the full pipeline
 
@@ -171,4 +169,4 @@ There is **no minimum gap between ads**, **no target ad count**, **no cap on the
 npm run placement -w server -- <hash-prefix> [--cached]
 ```
 
-Runs only this stage on a video already in `data/`, using its cached ingest, transcript and signals. It writes to `data/<hash>/playground/` and never touches the app's own `placement.json`. Every run calls the model again: one call for every chunk with dialogue (not only the ones an earlier version would have skipped for being close together), run in parallel, plus one summary call, cached in `playground/`. `--cached` re-prints the last result for free. The terminal shows each chunk with its window, the model's picks, and why each was accepted or rejected.
+Runs only this stage on a video already in `data/`, using its cached ingest, transcript and signals. It writes to `data/<hash>/playground/` and never touches the app's own `placement.json`. Every run calls the model again: one call for every chunk with dialogue (not only the ones an earlier version would have skipped for being close together), run in parallel, plus one summary call, cached in `playground/`. `--cached` re-prints the last result for free. The terminal shows each chunk with its window, the model's picks with the dialogue either side of each cut, and why each was accepted or rejected. Add `--lines` to also print each chunk's dialogue exactly as the model saw it — numbered lines with the measured silences and shot cuts between them — with a marker on the line each ad landed after.

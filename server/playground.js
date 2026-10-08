@@ -239,15 +239,14 @@ Current lines:
 4. [423.5–425.9] Doctor, how is my father now?
 5. [426.2–428.0] We need to operate tonight.
 Output:
-{"placement": {"line_id": 3, "brand_id": "brand_x", "fit": 0.9, "reason": "The train-journey conversation ends at line 3, followed by a 5.9 s measured silence and a shot cut into a new scene, and Brand X fits the journey."}, "alternatives": [], "contexts_nearby": ["hospital", "illness"], "why_not_others": "Line 5 is inside a hospital emergency, which blocks every brand."}
-Note that line 3 still sits right before a hospital scene. Code will check that against each brand's never_next_to, which is why you must report contexts_nearby honestly.
+{"placement": {"line_id": 3, "brand_id": "brand_x", "fit": 0.9, "reason": "The train-journey conversation ends at line 3, followed by a 5.9 s measured silence and a shot cut into a new scene, and Brand X fits the journey.", "contexts_nearby": ["hospital", "illness"]}, "alternatives": [], "why_not_others": "Line 5 is inside a hospital emergency, which blocks every brand."}
+Note that line 3 still sits right before a hospital scene, so its own contexts_nearby names it. Every choice carries its own list, judged at its own line: a choice further back, with no sensitive scene before or after it, has an empty list even though this one does not. Code checks each choice's list against that choice's brand, which is why you must report them honestly.
 
 OUTPUT
 Return JSON only, in exactly this shape:
 {
-  "placement": {"line_id": 0, "brand_id": "...", "fit": 0.0, "reason": "..."} or null,
-  "alternatives": [{"line_id": 0, "brand_id": "...", "fit": 0.0, "reason": "..."}],
-  "contexts_nearby": ["..."],
+  "placement": {"line_id": 0, "brand_id": "...", "fit": 0.0, "reason": "...", "contexts_nearby": ["..."]} or null,
+  "alternatives": [{"line_id": 0, "brand_id": "...", "fit": 0.0, "reason": "...", "contexts_nearby": ["..."]}],
   "why_not_others": "..."
 }
 - placement: your best choice, or null if no ad should play in this stretch.
@@ -256,7 +255,7 @@ Return JSON only, in exactly this shape:
 - fit (0–1): 0 = unrelated to the scenes around the line, 0.5 = loosely related, 1 = directly matches what they show.
 - reason: one English sentence: which conversation ends at that line, what silence or shot cut is there, and why this brand fits.
 - alternatives: 2 other valid choices, best first, preferably after different lines AND a different brand each (code checks every choice, and uses the next one if yours fails or if code needs a different brand here to avoid repeating one). Fewer only if fewer points pass the rules.
-- contexts_nearby: every item from any brand's "never_next_to" that appears in the scene before OR after your chosen line. Use the exact strings. Empty only if you are sure there is none.
+- contexts_nearby: on EACH choice, every item from any brand's "never_next_to" that appears in the scene before OR after THAT choice's own line. Judge each choice at its own line and nowhere else: a sensitive scene next to one choice does not belong on another choice 90 seconds away, and one next to an alternative must be listed on that alternative even if your main pick is clear of it. Use the exact strings. Empty only if you are sure there is none for that line.
 - why_not_others: one or two sentences on why other points were not chosen.
 `.trim();
 
@@ -283,22 +282,22 @@ ${number(nextLines, "N")}
 const choice = {
   type: "object",
   additionalProperties: false,
-  required: ["line_id", "brand_id", "fit", "reason"],
+  required: ["line_id", "brand_id", "fit", "reason", "contexts_nearby"],
   properties: {
     line_id: { type: "integer", enum: Array.from({ length: currentLineCount }, (_, i) => i + 1) },
     brand_id: { type: "string", enum: selectableBrands },
     fit: { type: "number" },
     reason: { type: "string" },
+    contexts_nearby: { type: "array", items: { type: "string", enum: allNegative } },
   },
 };
 const schema = {
   type: "object",
   additionalProperties: false,
-  required: ["placement", "alternatives", "contexts_nearby", "why_not_others"],
+  required: ["placement", "alternatives", "why_not_others"],
   properties: {
     placement: { anyOf: [choice, { type: "null" }] },
     alternatives: { type: "array", items: choice },
-    contexts_nearby: { type: "array", items: { type: "string", enum: allNegative } },
     why_not_others: { type: "string" },
   },
 };
@@ -361,10 +360,10 @@ try {
 // stages/placement.ts. Not shown here: the same-brand-adjacent, repeat-cap and gap/budget checks —
 // those depend on every chunk's answer and the chosen schedule, which don't exist at this scale.)
 console.log("\n==================== CODE CHECKS ====================");
-const nearby = new Set(answer.contexts_nearby ?? []);
 const options = [answer.placement, ...(answer.alternatives ?? [])].filter(Boolean);
 if (!options.length) console.log("No placement proposed: nothing to check.");
 for (const [i, o] of options.entries()) {
+  const nearby = new Set(o.contexts_nearby ?? []);
   const brand = brands.find((b) => b.brand_id === o.brand_id);
   const problems = [];
   if (!brand) problems.push(`unknown brand ${o.brand_id}`);

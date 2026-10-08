@@ -1,4 +1,4 @@
-// LLM ad placement (config.placement.mode = "llm"). One LLM call per transcription chunk (the audio
+// LLM ad placement. One LLM call per transcription chunk (the audio
 // pieces from ingest) reads that chunk's dialogue, with the measured silences and shot cuts written
 // in, and picks the line after which an ad plays and the brand. Every chunk is called independently
 // and in parallel: none is told what any other chunk decided, so the model only ever judges one
@@ -8,7 +8,7 @@
 // quality subject to the ad-load budget and never repeating a brand back to back (see
 // scheduleBreaks). There is no minimum gap between ads: the fit floor alone gates what plays. A cut
 // that then fails the speech check is dropped and the schedule is redrawn without it.
-import type { Brand, Break, Catalogue, Creative, IngestArtifact, Interval, MatchedCandidate, ProgrammeContext, ScoreWeights, Segment, SelectionLog, Signals, Transcript } from "shared";
+import type { Brand, Break, Catalogue, Creative, CutDialogue, IngestArtifact, Interval, LineRef, ProgrammeContext, ScheduleWeights, Segment, SelectionLog, Signals, Transcript } from "shared";
 import fs from "node:fs/promises";
 import { ARTIFACTS, readKeyed, writeKeyed } from "../lib/artifacts";
 import { hashJson } from "../lib/hash";
@@ -25,11 +25,11 @@ import {
 } from "../prompts/placement";
 import { ProgrammeResponse, STORY_PROMPT_VERSION, programmeJsonSchema, storySystemPrompt, storyUserPrompt } from "../prompts/programme";
 import { artifactPath, type StageContext } from "./context";
-import { listenCheck } from "./match";
-import { pickCreative, shortestCreative } from "./select";
+import { pickCreative, shortestCreative } from "./creatives";
+import { listenCheck } from "./listen";
 
 /** Bump when the chunk, cut, scheduling or check logic below changes, so cached placements are recomputed. */
-export const PLACEMENT_LOGIC_VERSION = 14;
+export const PLACEMENT_LOGIC_VERSION = 16;
 
 /** Safety valve for pathological inputs; real episodes explore a few thousand schedules at most (see select.ts). */
 const MAX_SEARCH_NODES = 500_000;
@@ -78,6 +78,9 @@ export function renderLines(
     .map((x) => x.text)
     .join("\n");
 }
+
+/** Pure: one dialogue line trimmed to what is worth reading back. */
+export const lineRef = (l: Segment): LineRef => ({ start: l.start, end: l.end, text: l.text });
 
 /**
  * Pure: where exactly the ad cuts in after a chosen line. Inside a measured silence in the gap
@@ -136,10 +139,12 @@ export function freeIntervals(span: Interval, words: Interval[], pad: number): I
 
 /**
  * Pure: the content safety rules code enforces on one option from the model, independent of any
- * other option or chunk. Empty = passes. Relies on the contexts the model reported as nearby
- * (there is no separate scene analysis). Not repeating a brand back to back is a separate, later
- * check (see scheduleBreaks): it depends on which chunks end up adjacent in the final schedule,
- * which isn't known until every chunk has answered.
+ * other option or chunk. Empty = passes. Relies on the contexts the model reported as nearby for
+ * THIS option's own line — each option carries its own list, so a sensitive scene beside one option
+ * never blocks another further away, and one beside an alternative is still caught (there is no
+ * separate scene analysis). Not repeating a brand back to back is a separate, later check (see
+ * scheduleBreaks): it depends on which chunks end up adjacent in the final schedule, which isn't
+ * known until every chunk has answered.
  */
 export function checkOption(
   o: { brandId: string; fit: number },
@@ -195,6 +200,10 @@ export interface SlotLog {
     brandId: string;
     fit: number;
     reason: string;
+    /** The dialogue either side of the cut, so a decision can be read without the prompt. */
+    dialogue?: CutDialogue;
+    /** The sensitive contexts the model reported at THIS option's line. */
+    contextsNearby: string[];
     cutTime?: number;
     basis?: string;
     outcome: "accepted" | "rejected";
@@ -225,6 +234,8 @@ export interface ScheduleItem {
   cutTime: number;
   basis: "silence" | "speechFree";
   pauseSec: number;
+  /** The dialogue either side of the cut, carried through so a placed break can show it. */
+  dialogue?: CutDialogue;
 }
 
 export interface ScheduledPick {
@@ -240,7 +251,7 @@ export interface ScheduleInputs {
   brands: Brand[];
   durationSec: number;
   maxAdLoadPct: number;
-  weights: ScoreWeights["combined"];
+  weights: ScheduleWeights;
   language: string;
   /** Subtracted from an item's score for every earlier use of the same brand in this schedule — a
    *  tie-break, not a ban: a repeat still wins when it is clearly the better fit. */
@@ -249,8 +260,8 @@ export interface ScheduleInputs {
   maxBrandRepeats: number;
 }
 
-/** Pure: `fit` and pause length combined the same way the rules pipeline scores a break. */
-export const combinedScore = (item: Pick<ScheduleItem, "fit" | "pauseSec">, weights: ScoreWeights["combined"]) =>
+/** Pure: a candidate's score — how good the pause is, and how well the brand fits, weighted. */
+export const combinedScore = (item: Pick<ScheduleItem, "fit" | "pauseSec">, weights: ScheduleWeights) =>
   Math.min(1, item.pauseSec / 3) * weights.where + item.fit * weights.brandFit;
 
 /**
@@ -366,7 +377,6 @@ export async function runPlacement(
     model: cfg.openrouter.reasonModel,
     catalogue: ctx.catalogue.hash,
     placement: cfg.placement,
-    pacing: cfg.pacing,
     thresholds: cfg.thresholds,
     listen: cfg.listen,
     segments: hashJson(transcript.segments),
@@ -452,14 +462,24 @@ export async function runPlacement(
     log.answer = answer;
 
     for (const o of [answer.placement, ...answer.alternatives].filter((x): x is NonNullable<typeof x> => !!x)) {
-      const entry: SlotLog["options"][number] = { lineId: o.line_id, brandId: o.brand_id, fit: o.fit, reason: o.reason, outcome: "rejected", problems: [] };
+      const entry: SlotLog["options"][number] = {
+        lineId: o.line_id,
+        brandId: o.brand_id,
+        fit: o.fit,
+        reason: o.reason,
+        contextsNearby: o.contexts_nearby,
+        outcome: "rejected",
+        problems: [],
+      };
       log.options.push(entry);
       const line = current[o.line_id - 1];
       if (!line) {
         entry.problems.push(`line ${o.line_id} is not one of this chunk's lines`);
         continue;
       }
-      const cut = cutAfterLine(line, current[o.line_id] ?? next[0], { silences, shotCuts, speech }, {
+      const following = current[o.line_id] ?? next[0];
+      entry.dialogue = { after: lineRef(line), ...(following && { before: lineRef(following) }) };
+      const cut = cutAfterLine(line, following, { silences, shotCuts, speech }, {
         minSpeechFreeSec: cfg.thresholds.minSpeechFreeSec,
         padSec: cfg.thresholds.cutPaddingMs / 1000,
         durationSec: duration,
@@ -475,11 +495,11 @@ export async function runPlacement(
         continue;
       }
       entry.problems.push(
-        ...checkOption({ brandId: o.brand_id, fit: o.fit }, { brands, blockAll, contextsNearby: answer.contexts_nearby, minBrandFit: cfg.placement.minBrandFit }),
+        ...checkOption({ brandId: o.brand_id, fit: o.fit }, { brands, blockAll, contextsNearby: o.contexts_nearby, minBrandFit: cfg.placement.minBrandFit }),
       );
       if (entry.problems.length) continue;
 
-      const item: ScheduleItem = { chunk: w.chunk, lineId: o.line_id, brandId: o.brand_id, fit: o.fit, reason: o.reason, cutTime: cut.cutTime, basis: cut.basis!, pauseSec: cut.pauseSec };
+      const item: ScheduleItem = { chunk: w.chunk, lineId: o.line_id, brandId: o.brand_id, fit: o.fit, reason: o.reason, cutTime: cut.cutTime, basis: cut.basis!, pauseSec: cut.pauseSec, dialogue: entry.dialogue };
       itemsByChunk[i].push(item);
       entryFor.set(item, entry);
     }
@@ -496,8 +516,8 @@ export async function runPlacement(
       itemsByChunk,
       brands,
       durationSec: duration,
-      maxAdLoadPct: cfg.pacing.maxAdLoadPct,
-      weights: cfg.scoring.combined,
+      maxAdLoadPct: cfg.placement.maxAdLoadPct,
+      weights: cfg.scoring,
       language: cfg.contentLanguage,
       repeatPenalty: cfg.placement.brandRepeatPenalty,
       maxBrandRepeats: maxBrandRepeats(duration),
@@ -506,10 +526,10 @@ export async function runPlacement(
     let anyDropped = false;
     for (const p of picks) {
       if (verified.has(p.item)) continue;
-      const probe = { id: `chunk${p.item.chunk}-line${p.item.lineId}`, cutTime: p.item.cutTime } as MatchedCandidate;
-      await listenCheck(ctx, probe, ingest.fullAudio, duration, speech);
-      if (probe.rejected) {
-        entryFor.get(p.item)!.problems.push(probe.rejected.reason);
+      const target = { id: `chunk${p.item.chunk}-line${p.item.lineId}`, cutTime: p.item.cutTime };
+      const heard = await listenCheck(ctx, target, ingest.fullAudio, duration, speech);
+      if (heard.rejected) {
+        entryFor.get(p.item)!.problems.push(heard.rejected);
         itemsByChunk[p.item.chunk - 1] = itemsByChunk[p.item.chunk - 1].filter((it) => it !== p.item);
         anyDropped = true;
       } else {
@@ -538,6 +558,7 @@ export async function runPlacement(
       fit: p.item.fit,
       combinedScore: p.combinedScore,
       reason: p.item.reason,
+      dialogue: p.item.dialogue,
     };
   });
 
